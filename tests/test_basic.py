@@ -347,6 +347,106 @@ WEB_EXPORT = ROOT / "tests" / "fixtures" / "claude_web_export.json"
 COMPACTED = ROOT / "tests" / "fixtures" / "compacted_session.jsonl"
 
 
+CHATGPT_EXPORT = ROOT / "tests" / "fixtures" / "chatgpt_export.json"
+
+
+class ChatGPTExportTests(unittest.TestCase):
+    def test_detection_and_parse(self):
+        self.assertTrue(ch.is_web_export(CHATGPT_EXPORT))
+        parsed = ch.parse_web_export(CHATGPT_EXPORT)
+        self.assertEqual(parsed["meta"]["summaries"],
+                         ["Fix docker compose networking"])
+        roles = [t["role"] for t in parsed["turns"]]
+        self.assertEqual(roles, ["user", "assistant", "assistant"])
+        text = str(parsed["turns"])
+        self.assertIn("bridge network", text)
+        self.assertNotIn("system", roles)
+
+    def test_timestamps_are_iso(self):
+        parsed = ch.parse_web_export(CHATGPT_EXPORT)
+        self.assertTrue(parsed["meta"]["first_ts"].startswith("2026-"))
+
+
+class MergeTests(unittest.TestCase):
+    def test_merge_two_sessions(self):
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()):
+            merged = ch.merge_parsed([ch.parse_session(COMPACTED),
+                                      ch.parse_session(FIXTURE)])
+        self.assertEqual(merged["meta"]["n_user"], 3)      # 1 + 2
+        roles = [t["role"] for t in merged["turns"]]
+        self.assertEqual(roles.count("session-break"), 2)
+        doc = ch.build_deterministic(merged, Path("2 sessions"),
+                                     include_tools=False, max_chars=80_000)
+        self.assertIn("Session 1", doc)
+        self.assertIn("Session 2", doc)
+        self.assertIn("rate limiting", doc)                # from COMPACTED
+        self.assertIn("unicode", doc)                      # from FIXTURE
+        self.assertIn("auth.py", str(merged["files_written"]))
+
+
+class JsonFormatTests(unittest.TestCase):
+    def test_json_document_structure(self):
+        parsed = ch.parse_session(FIXTURE)
+        doc = ch.build_json(parsed, FIXTURE, summary=None)
+        data = json.loads(doc)
+        self.assertEqual(data["meta"]["n_user"], 2)
+        self.assertIn("auth.py", str(data["activity"]["files_written"]))
+        self.assertEqual(data["turns"][0]["role"], "user")
+        self.assertIn("generator", data)
+
+    def test_json_includes_summary_when_given(self):
+        parsed = ch.parse_session(FIXTURE)
+        data = json.loads(ch.build_json(parsed, FIXTURE, summary="## Goal\nx"))
+        self.assertEqual(data["summary"], "## Goal\nx")
+
+
+class TokenStatsTests(unittest.TestCase):
+    def test_usage_summed_and_rendered(self):
+        parsed = ch.parse_session(COMPACTED)   # assistant record has usage
+        self.assertEqual(parsed["meta"]["tok_in"], 1200)
+        self.assertEqual(parsed["meta"]["tok_out"], 45)
+        doc = ch.build_deterministic(parsed, COMPACTED,
+                                     include_tools=False, max_chars=80_000)
+        self.assertIn("**Tokens:**", doc)
+
+    def test_no_usage_no_line(self):
+        parsed = ch.parse_session(FIXTURE)     # fixture has no usage fields
+        doc = ch.build_deterministic(parsed, FIXTURE,
+                                     include_tools=False, max_chars=80_000)
+        self.assertNotIn("**Tokens:**", doc)
+
+
+class ParallelMapTests(unittest.TestCase):
+    def test_api_provider_chunks_run_in_threads_and_stay_ordered(self):
+        import contextlib
+        import io
+        import threading as th
+        seen_threads = set()
+
+        def fake_call(key, model, prompt):
+            seen_threads.add(th.get_ident())
+            time.sleep(0.05)
+            part = prompt.split("PART:\n", 1)[1][:20] if "PART:\n" in prompt \
+                else "reduce"
+            return f"note<{part}>"
+
+        import time
+        big = "\n\n".join(f"### 🧑 User\n\nmsg {i} " + "x" * 300
+                          for i in range(10))
+        with unittest.mock.patch.dict(ch.PROVIDERS["openai"],
+                                      {"call": fake_call}), \
+                unittest.mock.patch.object(ch, "LLM_INPUT_CAP", 1000), \
+                unittest.mock.patch.object(ch, "CHUNK_CAP", 800), \
+                unittest.mock.patch.dict(ch.os.environ,
+                                         {"OPENAI_API_KEY": "sk-test"}), \
+                contextlib.redirect_stderr(io.StringIO()):
+            out = ch.llm_summarize("openai", None, big, use_cache=False)
+        self.assertTrue(out.startswith("note<"))
+        self.assertGreater(len(seen_threads), 1)   # genuinely parallel
+
+
 class CompactionTests(unittest.TestCase):
     """Sessions that went through /compact."""
 
@@ -383,12 +483,12 @@ class WebExportTests(unittest.TestCase):
         self.assertFalse(ch.is_web_export(FIXTURE))
 
     def test_parse_picks_newest_by_default(self):
-        parsed = ch.parse_claude_export(WEB_EXPORT)
+        parsed = ch.parse_web_export(WEB_EXPORT)
         self.assertEqual(parsed["meta"]["session_id"], "web-conv-002")
         self.assertEqual(parsed["meta"]["summaries"], ["Trip planning notes"])
 
     def test_parse_by_name(self):
-        parsed = ch.parse_claude_export(WEB_EXPORT, name_filter="webhook")
+        parsed = ch.parse_web_export(WEB_EXPORT, name_filter="webhook")
         self.assertEqual(parsed["meta"]["session_id"], "web-conv-001")
         self.assertEqual(parsed["meta"]["n_user"], 2)
         self.assertEqual(parsed["meta"]["n_assistant"], 2)
@@ -397,7 +497,7 @@ class WebExportTests(unittest.TestCase):
         self.assertIn("[attachment]", text)
 
     def test_renders_without_project_line(self):
-        parsed = ch.parse_claude_export(WEB_EXPORT, name_filter="webhook")
+        parsed = ch.parse_web_export(WEB_EXPORT, name_filter="webhook")
         doc = ch.build_deterministic(parsed, WEB_EXPORT,
                                      include_tools=False, max_chars=80_000)
         self.assertNotIn("**Project:**", doc)
@@ -406,7 +506,7 @@ class WebExportTests(unittest.TestCase):
 
     def test_no_match_errors_with_hint(self):
         with self.assertRaises(SystemExit) as cm:
-            ch.parse_claude_export(WEB_EXPORT, name_filter="zzz")
+            ch.parse_web_export(WEB_EXPORT, name_filter="zzz")
         self.assertIn("--list", str(cm.exception))
 
 

@@ -31,8 +31,10 @@ schema notes before touching the parser.
   never fail the run; bump `CACHE_VERSION` whenever `CHUNK_PROMPT`
   changes. `--focus` goes only into the reduce pass so cached chunk
   notes stay reusable.
-- **Chunk calls are sequential.** Parallel `claude -p` subprocesses
-  conflict; do not parallelize the map loop.
+- **Chunk calls are sequential for `SERIAL_PROVIDERS`** (claude-cli,
+  ollama) — parallel `claude -p` subprocesses conflict and local Ollama
+  boxes choke. API providers fan out via ThreadPoolExecutor; keep the
+  serial/parallel split.
 
 ## Commands
 
@@ -46,8 +48,10 @@ pip install -e . && claude-handoff --version  # packaging check
 
 - Discovery: `find_sessions`, `session_label` (title + first prompt),
   `find_session_by_name`, `list_sessions`, `cwd_project_filter`
-- Web-export input: `is_web_export`, `parse_claude_export` (same parsed
-  shape as `parse_session`), `list_export_conversations`
+- Web-export input: `is_web_export`, `parse_web_export` (claude.ai
+  `chat_messages` AND ChatGPT `mapping`/`current_node`; same parsed shape
+  as `parse_session`), `list_export_conversations`
+- Merge & formats: `merge_parsed` (session-break turns), `build_json`
 - Tail filters: `slice_turns` (`--last`, `--since`), `_since_cutoff`
 - Hook: `install_hook` / `run_hook_mode` (`--install-hook`,
   `--hook-stdin`) — hook mode swallows all errors by design: a hook must

@@ -1,0 +1,92 @@
+[
+  {
+    "title": "Fix docker compose networking",
+    "create_time": 1787389200.0,
+    "update_time": 1787392800.0,
+    "current_node": "n4",
+    "mapping": {
+      "n0": {
+        "id": "n0",
+        "message": null,
+        "parent": null,
+        "children": [
+          "n1"
+        ]
+      },
+      "n1": {
+        "id": "n1",
+        "parent": "n0",
+        "children": [
+          "n2"
+        ],
+        "message": {
+          "author": {
+            "role": "system"
+          },
+          "create_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              ""
+            ]
+          }
+        }
+      },
+      "n2": {
+        "id": "n2",
+        "parent": "n1",
+        "children": [
+          "n3"
+        ],
+        "message": {
+          "author": {
+            "role": "user"
+          },
+          "create_time": 1787389300.0,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "τα containers δεν βλέπουν το δίκτυο μεταξύ τους"
+            ]
+          }
+        }
+      },
+      "n3": {
+        "id": "n3",
+        "parent": "n2",
+        "children": [
+          "n4"
+        ],
+        "message": {
+          "author": {
+            "role": "assistant"
+          },
+          "create_time": 1787389400.0,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "Βάλε τα στο ίδιο user-defined bridge network."
+            ]
+          }
+        }
+      },
+      "n4": {
+        "id": "n4",
+        "parent": "n3",
+        "children": [],
+        "message": {
+          "author": {
+            "role": "assistant"
+          },
+          "create_time": 1787389500.0,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "Δηλαδή: networks: app_net σε κάθε service."
+            ]
+          }
+        }
+      }
+    }
+  }
+]

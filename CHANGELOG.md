@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.0 — 2026-08-23
+
+- **ChatGPT exports as input**: the OpenAI data-export
+  `conversations.json` (mapping graph) parses like any session — the
+  canonical thread is followed via `current_node`, system/tool records
+  skipped. Same `--list` / `--name` flow as claude.ai exports.
+- **`--merge`**: every session in scope (project / cwd / `--name` match)
+  becomes ONE chronological handoff with ⏱ session-break markers, merged
+  activity and summed token counts (25 most recent max, nearly-empty
+  sessions skipped).
+- **`--format json`**: machine-readable handoff (meta, activity, turns,
+  sidechains, optional LLM summary).
+- **Token stats**: sessions with API `usage` data get a
+  `**Tokens:** X in (incl. cache) / Y out` header line.
+- **Parallel map-reduce**: chunk summaries run 4-way concurrent on API
+  providers; `claude-cli`/`ollama` stay sequential (subprocess/local-box
+  constraints). Failures still land in the cache-resume path.
+
 ## 0.6.1 — 2026-08-23
 
 - **/compact handled properly**: the machine-written history summary that

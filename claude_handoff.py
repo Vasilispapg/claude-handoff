@@ -24,6 +24,7 @@ No key needed for --llm claude-cli — it uses your local Claude Code login.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -38,7 +39,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -49,6 +50,11 @@ TOOL_LINE_CAP = 200
 DEFAULT_MAX_CHARS = 80_000       # global cap on the transcript section
 LLM_INPUT_CAP = 400_000          # max transcript chars for a single LLM pass
 CHUNK_CAP = 200_000              # chunk size for map-reduce over huge sessions
+
+# Subprocess/local backends must not run chunks concurrently (nested claude
+# CLIs conflict; a local Ollama box chokes); API providers fan out fine.
+SERIAL_PROVIDERS = {"claude-cli", "ollama"}
+PARALLEL_WORKERS = 4
 
 # Chunk-note cache: failed/interrupted map-reduce runs resume for free, and
 # re-runs (e.g. with a different --focus) reuse paid-for chunk notes.
@@ -244,37 +250,90 @@ def _load_web_conversations(path: Path) -> list[dict]:
         else []
 
 
-def parse_claude_export(path: Path, name_filter: str | None = None) -> dict:
-    """Parse a claude.ai data export into the same shape as parse_session.
+def _epoch_iso(t) -> str | None:
+    try:
+        return datetime.fromtimestamp(float(t), timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
 
-    Picks the newest conversation, or the newest whose title matches
-    `name_filter` (case-insensitive substring).
-    """
-    convos = _load_web_conversations(path)
-    if name_filter:
-        q = name_filter.lower()
-        convos = [c for c in convos if q in str(c.get("name", "")).lower()]
-    if not convos:
-        raise SystemExit(
-            f"No conversation{f' matching {name_filter!r}' if name_filter else ''} "
-            f"in {path}. Run with --list to see the conversations it holds.")
-    convo = max(convos, key=lambda c: str(c.get("updated_at") or
-                                          c.get("created_at") or ""))
 
-    state = _new_parse_state()
-    meta = state["meta"]
-    meta["session_id"] = convo.get("uuid")
-    if convo.get("name"):
-        meta["summaries"].append(convo["name"])
+def _convo_title(convo: dict) -> str:
+    return str(convo.get("name") or convo.get("title") or "")
+
+
+def _convo_updated(convo: dict) -> datetime:
+    """Comparable freshness of a claude.ai (ISO) or ChatGPT (epoch) convo."""
+    ts = (_parse_ts(convo.get("updated_at") or convo.get("created_at"))
+          or _parse_ts(_epoch_iso(convo.get("update_time")
+                                  or convo.get("create_time"))))
+    return ts or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _chatgpt_messages(convo: dict) -> list[tuple[str, str, str | None]]:
+    """(role, text, iso_ts) triples from a ChatGPT export conversation —
+    walks the canonical thread backward from current_node."""
+    mapping = convo.get("mapping")
+    if not isinstance(mapping, dict):
+        return []
+    chain = []
+    node = mapping.get(convo.get("current_node"))
+    hops = 0
+    while isinstance(node, dict) and hops < 100_000:
+        chain.append(node)
+        node = mapping.get(node.get("parent"))
+        hops += 1
+    out = []
+    for node in reversed(chain):
+        msg = node.get("message")
+        if not isinstance(msg, dict):
+            continue
+        role = (msg.get("author") or {}).get("role")
+        if role not in ("user", "assistant"):
+            continue  # system prompts and tool traffic are noise here
+        content = msg.get("content") or {}
+        parts = content.get("parts") if isinstance(content, dict) else None
+        text = "\n".join(p for p in parts
+                         if isinstance(p, str)).strip() if parts else ""
+        if text:
+            out.append((role, text, _epoch_iso(msg.get("create_time"))))
+    return out
+
+
+def _claude_web_messages(convo: dict) -> list[tuple[str, str, str | None]]:
+    out = []
     for msg in convo.get("chat_messages") or []:
         if not isinstance(msg, dict):
             continue
         text = _web_message_text(msg)
-        if not text:
-            continue
-        role = "user" if msg.get("sender") == "human" else "assistant"
+        if text:
+            role = "user" if msg.get("sender") == "human" else "assistant"
+            out.append((role, text, msg.get("created_at")))
+    return out
+
+
+def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
+    """Parse a claude.ai or ChatGPT data export (conversations.json) into
+    the same shape as parse_session. Picks the newest conversation, or the
+    newest whose title matches `name_filter` (case-insensitive)."""
+    convos = _load_web_conversations(path)
+    if name_filter:
+        q = name_filter.lower()
+        convos = [c for c in convos if q in _convo_title(c).lower()]
+    if not convos:
+        raise SystemExit(
+            f"No conversation{f' matching {name_filter!r}' if name_filter else ''} "
+            f"in {path}. Run with --list to see the conversations it holds.")
+    convo = max(convos, key=_convo_updated)
+
+    state = _new_parse_state()
+    meta = state["meta"]
+    meta["session_id"] = convo.get("uuid") or convo.get("id")
+    if _convo_title(convo):
+        meta["summaries"].append(_convo_title(convo))
+    messages = (_claude_web_messages(convo) if "chat_messages" in convo
+                else _chatgpt_messages(convo))
+    for role, text, ts in messages:
         meta["n_user" if role == "user" else "n_assistant"] += 1
-        ts = msg.get("created_at")
         meta["first_ts"] = meta["first_ts"] or ts
         meta["last_ts"] = ts or meta["last_ts"]
         state["turns"].append({"role": role, "text_parts": [text],
@@ -285,13 +344,13 @@ def parse_claude_export(path: Path, name_filter: str | None = None) -> dict:
 
 
 def list_export_conversations(path: Path) -> None:
-    for c in sorted(_load_web_conversations(path),
-                    key=lambda c: str(c.get("updated_at") or ""),
+    for c in sorted(_load_web_conversations(path), key=_convo_updated,
                     reverse=True):
-        when = fmt_ts(c.get("updated_at") or c.get("created_at"))
-        n = len(c.get("chat_messages") or [])
-        print(f"{when}  {n:>4} msgs  {str(c.get('uuid', '?'))[:8]}  "
-              f"{one_line(str(c.get('name') or '(untitled)'), 70)}")
+        when = _convo_updated(c).astimezone().strftime("%Y-%m-%d %H:%M")
+        n = len(c.get("chat_messages") or c.get("mapping") or [])
+        cid = str(c.get("uuid") or c.get("id") or "?")[:8]
+        print(f"{when}  {n:>4} msgs  {cid}  "
+              f"{one_line(_convo_title(c) or '(untitled)', 70)}")
 
 
 def load_records(path: Path) -> list[dict]:
@@ -394,7 +453,7 @@ def _new_parse_state() -> dict:
             "session_id": None, "cwd": None, "git_branch": None,
             "version": None, "models": set(), "first_ts": None,
             "last_ts": None, "n_user": 0, "n_assistant": 0, "n_tools": 0,
-            "summaries": [],
+            "tok_in": 0, "tok_out": 0, "summaries": [],
         },
         "turns": [],            # {"role", "text_parts", "tools", "ts"}
         "files_written": {},    # path -> edit count
@@ -460,6 +519,16 @@ def _handle_assistant_record(rec: dict, state: dict) -> None:
     message = rec.get("message") or {}
     if message.get("model"):
         state["meta"]["models"].add(message["model"])
+    usage = message.get("usage")
+    if isinstance(usage, dict):
+        try:
+            state["meta"]["tok_in"] += (
+                int(usage.get("input_tokens") or 0)
+                + int(usage.get("cache_read_input_tokens") or 0)
+                + int(usage.get("cache_creation_input_tokens") or 0))
+            state["meta"]["tok_out"] += int(usage.get("output_tokens") or 0)
+        except (TypeError, ValueError):
+            pass
     content = message.get("content")
     if not isinstance(content, list):
         return
@@ -655,8 +724,11 @@ def render_header(parsed: dict, source: Path) -> str:
         f"- **Assistant model:** {models}",
         f"- **Activity:** {m['n_user']} user messages, "
         f"{m['n_assistant']} assistant replies, {m['n_tools']} tool calls",
-        f"- **Source:** `{source}`",
     ]
+    if m.get("tok_in") or m.get("tok_out"):
+        lines.append(f"- **Tokens:** {m['tok_in']:,} in (incl. cache) / "
+                     f"{m['tok_out']:,} out")
+    lines.append(f"- **Source:** `{source}`")
     if m["summaries"]:
         lines += ["", f"**Session title:** {m['summaries'][-1]}"]
     return "\n".join(lines)
@@ -691,7 +763,9 @@ def render_transcript(parsed: dict, include_tools: bool,
     blocks = []
     for turn in parsed["turns"]:
         text = "\n\n".join(turn["text_parts"]).strip()
-        if turn["role"] == "compact":
+        if turn["role"] == "session-break":
+            blocks.append(f"### ⏱ {text}")
+        elif turn["role"] == "compact":
             blocks.append("### 📜 Compacted history (auto-summary of the "
                           "earlier part of this session)\n\n"
                           + truncate(text, USER_MSG_CAP))
@@ -741,6 +815,32 @@ def render_sidechains(parsed: dict, max_each: int = 2000) -> str:
 def render_footer() -> str:
     return ("---\n\n_Exported with [claude-handoff]"
             "(https://github.com/Vasilispapg/claude-handoff) — continue from here._")
+
+
+def build_json(parsed: dict, source: Path, summary: str | None) -> str:
+    """Machine-readable handoff (--format json)."""
+    m = dict(parsed["meta"])
+    m["models"] = sorted(m["models"])
+    payload = {
+        "generator": f"claude-handoff {__version__}",
+        "source": str(source),
+        "meta": m,
+        "activity": {
+            "files_written": parsed["files_written"],
+            "files_read": parsed["files_read"],
+            "commands": parsed["commands"],
+        },
+        "turns": [{"role": t["role"],
+                   "text": "\n\n".join(t["text_parts"]).strip(),
+                   "tools": t["tools"], "ts": t.get("ts")}
+                  for t in parsed["turns"]],
+        "sidechains": parsed.get("sidechains", []),
+    }
+    if summary is not None:
+        payload["summary"] = summary
+    if parsed.get("slice_note"):
+        payload["slice_note"] = parsed["slice_note"]
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
 def build_deterministic(parsed: dict, source: Path, include_tools: bool,
@@ -1099,31 +1199,64 @@ def llm_summarize(provider: str, model: str | None, transcript: str,
         return result
 
     chunks = _chunk_text(transcript, CHUNK_CAP)
+    serial = provider in SERIAL_PROVIDERS
+    workers = 1 if serial else min(PARALLEL_WORKERS, len(chunks))
     print(f"Transcript is {len(transcript):,} chars — map-reduce over "
-          f"{len(chunks)} chunks (up to {len(chunks) + 1} LLM calls).",
+          f"{len(chunks)} chunks (up to {len(chunks) + 1} LLM calls"
+          + ("" if workers == 1 else f", {workers} in parallel") + ").",
           file=sys.stderr)
     st = _new_progress(len(chunks) + 1)  # + the reduce pass
-    notes = []
-    for i, chunk in enumerate(chunks, 1):
+    notes: list = [None] * len(chunks)
+    todo: list = []
+    for i, chunk in enumerate(chunks):
         # Focus is applied only in the reduce pass, so chunk notes stay
         # reusable across runs with different --focus.
-        prompt = (CHUNK_PROMPT.format(i=i, n=len(chunks))
+        prompt = (CHUNK_PROMPT.format(i=i + 1, n=len(chunks))
                   + "\nPART:\n" + chunk)
         cache_file = _chunk_cache_path(chunk, provider, model)
         cached = _cache_get(cache_file) if use_cache else None
         if cached is not None:
-            print(f"  part {i}/{len(chunks)} — cached.", file=sys.stderr)
-            notes.append(cached)
+            print(f"  part {i + 1}/{len(chunks)} — cached.", file=sys.stderr)
+            notes[i] = cached
             st["done"] += 1
-            continue
-        result = _progress_step(
-            st, f"summarizing part {i}/{len(chunks)} "
-                f"({len(chunk):,} chars)…",
-            lambda p=prompt: _call_with_retry(cfg["call"], key, model, p))
-        if use_cache:
-            _cache_put(cache_file, result)
-        notes.append(result)
-        st["done"] += 1
+        else:
+            todo.append((i, prompt, cache_file))
+
+    if workers == 1 or len(todo) <= 1:
+        for i, prompt, cache_file in todo:
+            result = _progress_step(
+                st, f"summarizing part {i + 1}/{len(chunks)} "
+                    f"({len(chunks[i]):,} chars)…",
+                lambda p=prompt: _call_with_retry(cfg["call"], key, model, p))
+            if use_cache:
+                _cache_put(cache_file, result)
+            notes[i] = result
+            st["done"] += 1
+    else:
+        lock = threading.Lock()
+
+        def _one(item: tuple) -> None:
+            i, prompt, cache_file = item
+            result = _call_with_retry(cfg["call"], key, model, prompt)
+            if use_cache:
+                _cache_put(cache_file, result)
+            with lock:
+                notes[i] = result
+                st["done"] += 1
+                if st["tty"]:
+                    _draw_progress(st, f"part {i + 1}/{len(chunks)} done")
+                else:
+                    print(f"  part {i + 1}/{len(chunks)} done.",
+                          file=sys.stderr)
+
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers) as pool:
+            futures = [pool.submit(_one, item) for item in todo]
+            for fut in concurrent.futures.as_completed(futures):
+                fut.result()  # re-raises worker failures (finished
+                #               chunks are already in the cache)
+        if st["tty"]:
+            print(file=sys.stderr)
     joined = "\n\n".join(f"[Part {i}/{len(chunks)} notes]\n{n.strip()}"
                          for i, n in enumerate(notes, 1))
     overhead = (
@@ -1296,6 +1429,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "contains QUERY (case-insensitive)")
     ap.add_argument("--project", metavar="NAME",
                     help="pick latest session whose project path contains NAME")
+    ap.add_argument("--merge", action="store_true",
+                    help="merge every session in scope (project / cwd / "
+                         "--name match) into ONE handoff, oldest first")
+    ap.add_argument("--format", choices=["md", "json"], default="md",
+                    help="output format (default md; json is machine-"
+                         "readable)")
     ap.add_argument("--any", action="store_true",
                     help="ignore the current directory; consider sessions "
                          "of every project (default when outside a project)")
@@ -1351,6 +1490,40 @@ def _newest_named_session(query: str, project_filter: str | None) -> Path:
               f"Run --list to see all of them.", file=sys.stderr)
     print(f"Using session: {matches[0]}", file=sys.stderr)
     return matches[0]
+
+
+def merge_parsed(parsed_list: list[dict]) -> dict:
+    """Merge several parsed sessions (oldest first) into one, with a
+    session-break turn opening each — for --merge project-wide handoffs."""
+    merged = _new_parse_state()
+    merged.pop("_tool_names")
+    m = merged["meta"]
+    for n, parsed in enumerate(parsed_list, 1):
+        pm = parsed["meta"]
+        for key in ("cwd", "git_branch", "session_id", "version"):
+            m[key] = m[key] or pm[key]
+        m["models"] |= pm["models"]
+        m["first_ts"] = m["first_ts"] or pm["first_ts"]
+        m["last_ts"] = pm["last_ts"] or m["last_ts"]
+        for key in ("n_user", "n_assistant", "n_tools", "tok_in", "tok_out"):
+            m[key] += pm[key]
+        m["summaries"].extend(pm["summaries"])
+        label = (pm["summaries"][-1] if pm["summaries"]
+                 else f"{pm['n_user']} user messages")
+        merged["turns"].append({
+            "role": "session-break", "tools": [], "ts": pm["first_ts"],
+            "text_parts": [f"Session {n}/{len(parsed_list)} — "
+                           f"{fmt_ts(pm['first_ts'])} → "
+                           f"{fmt_ts(pm['last_ts'])} · {label}"],
+        })
+        merged["turns"].extend(parsed["turns"])
+        for fdict, key in ((parsed["files_written"], "files_written"),
+                           (parsed["files_read"], "files_read")):
+            for f, count in fdict.items():
+                merged[key][f] = merged[key].get(f, 0) + count
+        merged["commands"].extend(parsed["commands"])
+        merged["sidechains"].extend(parsed.get("sidechains", []))
+    return merged
 
 
 def looks_trivial(parsed: dict) -> bool:
@@ -1415,7 +1588,22 @@ def resolve_source(args: argparse.Namespace) -> Path:
 
 def build_document(parsed: dict, source: Path,
                    args: argparse.Namespace) -> str:
-    """Deterministic or LLM-summarized document, per the CLI flags."""
+    """Markdown or JSON document, deterministic or LLM-summarized."""
+    if args.format == "json":
+        summary = None
+        if args.llm:
+            outbound = (render_activity(parsed) + "\n\n"
+                        + render_transcript(parsed, include_tools=True,
+                                            max_chars=10**9))
+            if not args.no_redact:
+                outbound, n_red = redact_secrets(outbound)
+                if n_red:
+                    print(f"Redacted {n_red} secret-looking string(s).",
+                          file=sys.stderr)
+            summary = llm_summarize(args.llm, args.model, outbound,
+                                    focus=args.focus,
+                                    use_cache=not args.no_cache)
+        return build_json(parsed, source, summary)
     if args.llm:
         return build_llm(parsed, source, args.llm, args.model,
                          args.with_transcript, args.max_chars,
@@ -1458,11 +1646,39 @@ def main(argv: list[str] | None = None) -> None:
         else:
             list_sessions(args.project)
         return
-    source = resolve_source(args)
-    if is_web_export(source):
-        parsed = parse_claude_export(source, name_filter=args.name)
+    if args.merge:
+        if args.session:
+            raise SystemExit("--merge discovers sessions itself — drop the "
+                             "explicit path, use --project/--name to scope.")
+        scope = args.project
+        if not scope and not args.any:
+            scope = cwd_project_filter()
+        sessions = find_sessions(scope)
+        if args.name:
+            named = set(find_session_by_name(args.name, scope))
+            sessions = [s for s in sessions if s in named]
+        if len(sessions) > 25:
+            print(f"Merging the 25 most recent of {len(sessions)} sessions.",
+                  file=sys.stderr)
+            sessions = sessions[:25]
+        parsed_list = []
+        for s in reversed(sessions):            # oldest first
+            p = parse_session(s)
+            if p["turns"] and not looks_trivial(p):
+                parsed_list.append(p)
+        if not parsed_list:
+            raise SystemExit("No sessions to merge in this scope — try "
+                             "--project NAME or run --list.")
+        print(f"Merging {len(parsed_list)} sessions.", file=sys.stderr)
+        parsed = merge_parsed(parsed_list)
+        source = Path(f"{len(parsed_list)} merged sessions"
+                      + (f" [{scope}]" if scope else ""))
     else:
-        parsed = parse_session(source)
+        source = resolve_source(args)
+        if is_web_export(source):
+            parsed = parse_web_export(source, name_filter=args.name)
+        else:
+            parsed = parse_session(source)
     if not parsed["turns"]:
         raise SystemExit("Session parsed but contains no conversation turns.")
     slice_turns(parsed, last=args.last, since=args.since)

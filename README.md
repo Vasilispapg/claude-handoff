@@ -33,9 +33,15 @@ claude-handoff --since 2h          # only the last 2 hours of the session
 claude-handoff --include-tools     # keep collapsed per-tool-call detail
 claude-handoff --include-sidechains  # append subagent (sidechain) work
 
-# claude.ai web chats too — Settings → Privacy → Export data:
+# claude.ai AND ChatGPT web chats too (each app's data export):
 claude-handoff conversations.json --list
 claude-handoff conversations.json --name "webhook bug"
+
+# whole project in one handoff, oldest → newest:
+claude-handoff --project myrepo --merge
+
+# machine-readable:
+claude-handoff --format json -o session.json
 
 # auto-handoff: write one for every session when it ends
 claude-handoff --install-hook
@@ -86,6 +92,8 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 | `--name QUERY` | pick newest session (or web conversation) whose title/first prompt contains QUERY |
 | `--project NAME` | pick latest session whose project path contains NAME |
 | `--last N` / `--since 2h` | keep only the tail of the conversation (N user turns / a time window) |
+| `--merge` | merge every session in scope into ONE handoff (session-break markers, summed activity) |
+| `--format md\|json` | markdown (default) or machine-readable JSON |
 | `-o clipboard` | copy the handoff straight to the clipboard |
 | `--include-sidechains` | append a section with subagent (sidechain) work |
 | `--install-hook` / `--uninstall-hook` | auto-write a handoff to `~/.claude/handoffs/` when each session ends |
@@ -120,12 +128,13 @@ Nothing is sent anywhere unless you pass `--llm`.
 [█████████░░░░░░░░░░░░░░░] 3/9 chunks | 4m12s elapsed | ~8m left | summarizing part 4/8 (199,867 chars)…
 ```
 
+Sessions with API `usage` data also get a **Tokens** line in the header (input incl. cache / output). Map-reduce chunks run **4-way parallel** on API providers (`claude`/`openai`/`gemini`); `claude-cli` and `ollama` stay sequential by design.
+
 ## Roadmap
 
-- ChatGPT / Gemini exports as input (handoff in *both* directions)
-- `--format json` for programmatic use
-- Parallel chunk summarization for API providers
-- Project-wide handoff (`--project X --merge`) across sessions
+- Gemini exports as input (Google Takeout ships HTML only — needs a careful parser)
+- Homebrew formula, shell completions
+- Interactive session picker
 
 PRs welcome.
 

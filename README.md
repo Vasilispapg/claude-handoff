@@ -177,3 +177,7 @@ This space isn't empty — it's fragmented. Pick the tool that matches your situ
 ## License
 
 MIT
+
+---
+
+mcp-name: io.github.Vasilispapg/claude-handoff

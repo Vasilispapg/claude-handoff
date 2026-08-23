@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.Vasilispapg/claude-handoff",
+  "description": "Post-hoc session handoff for Claude Code: list sessions and build clean handoff documents another model or agent can continue from. Deterministic, zero dependencies.",
+  "repository": {
+    "url": "https://github.com/Vasilispapg/claude-handoff",
+    "source": "github"
+  },
+  "version": "0.8.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "claude-handoff",
+      "version": "0.8.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "--mcp",
+          "description": "run claude-handoff as an MCP server over stdio"
+        }
+      ]
+    }
+  ]
+}

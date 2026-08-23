@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 — 2026-08-23
+
+- MCP Registry metadata: `server.json` for
+  registry.modelcontextprotocol.io and the `mcp-name` ownership marker in
+  the README. No code changes.
+
 ## 0.8.0 — 2026-08-23
 
 - **`-i` interactive picker**: choose the session from a numbered list.

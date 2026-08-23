@@ -50,7 +50,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 

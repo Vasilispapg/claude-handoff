@@ -65,6 +65,16 @@ class RenderTests(unittest.TestCase):
                                      include_tools=False, max_chars=80_000)
         self.assertNotIn("<details>", doc)
 
+    def test_sidechains_only_with_flag(self):
+        doc = ch.build_deterministic(self.parsed, FIXTURE,
+                                     include_tools=False, max_chars=80_000)
+        self.assertNotIn("subagent chatter", doc)
+        doc2 = ch.build_deterministic(self.parsed, FIXTURE,
+                                      include_tools=False, max_chars=80_000,
+                                      include_sidechains=True)
+        self.assertIn("## Subagent work", doc2)
+        self.assertIn("subagent chatter", doc2)
+
     def test_global_truncation_keeps_head_and_tail(self):
         doc = ch.render_transcript(self.parsed, include_tools=False,
                                    max_chars=150)
@@ -331,6 +341,166 @@ class SummarizeTests(unittest.TestCase):
         self.assertIn("care about X", calls[-1])    # focus reaches reduce
         for prompt in calls[:-1]:
             self.assertIn("part", prompt.lower())   # map prompts are labeled
+
+
+WEB_EXPORT = ROOT / "tests" / "fixtures" / "claude_web_export.json"
+
+
+class WebExportTests(unittest.TestCase):
+    """claude.ai data-export (conversations.json) as input."""
+
+    def test_detection(self):
+        self.assertTrue(ch.is_web_export(WEB_EXPORT))
+        self.assertFalse(ch.is_web_export(FIXTURE))
+
+    def test_parse_picks_newest_by_default(self):
+        parsed = ch.parse_claude_export(WEB_EXPORT)
+        self.assertEqual(parsed["meta"]["session_id"], "web-conv-002")
+        self.assertEqual(parsed["meta"]["summaries"], ["Trip planning notes"])
+
+    def test_parse_by_name(self):
+        parsed = ch.parse_claude_export(WEB_EXPORT, name_filter="webhook")
+        self.assertEqual(parsed["meta"]["session_id"], "web-conv-001")
+        self.assertEqual(parsed["meta"]["n_user"], 2)
+        self.assertEqual(parsed["meta"]["n_assistant"], 2)
+        text = str(parsed["turns"])
+        self.assertIn("signature validation", text)
+        self.assertIn("[attachment]", text)
+
+    def test_renders_without_project_line(self):
+        parsed = ch.parse_claude_export(WEB_EXPORT, name_filter="webhook")
+        doc = ch.build_deterministic(parsed, WEB_EXPORT,
+                                     include_tools=False, max_chars=80_000)
+        self.assertNotIn("**Project:**", doc)
+        self.assertIn("Debug payment webhook", doc)
+        self.assertIn("🧑 User", doc)
+
+    def test_no_match_errors_with_hint(self):
+        with self.assertRaises(SystemExit) as cm:
+            ch.parse_claude_export(WEB_EXPORT, name_filter="zzz")
+        self.assertIn("--list", str(cm.exception))
+
+
+class SliceTests(unittest.TestCase):
+    """--last N and --since filters."""
+
+    def test_last_keeps_tail_user_turns(self):
+        parsed = ch.parse_session(FIXTURE)     # 2 user turns
+        ch.slice_turns(parsed, last=1)
+        roles = [t["role"] for t in parsed["turns"]]
+        self.assertEqual(roles, ["user", "assistant"])
+        self.assertIn("last 1 of 2", parsed["slice_note"])
+
+    def test_since_absolute_timestamp(self):
+        parsed = ch.parse_session(FIXTURE)     # msgs at 12:00→12:04 +03:00
+        ch.slice_turns(parsed, since="2026-08-20T12:02:30+03:00")
+        self.assertEqual(len(parsed["turns"]), 2)
+        self.assertEqual(parsed["turns"][0]["role"], "user")
+
+    def test_since_duration_relative_to_session_end(self):
+        parsed = ch.parse_session(FIXTURE)
+        ch.slice_turns(parsed, since="1m")     # last minute of the session
+        self.assertLess(len(parsed["turns"]), 4)
+        self.assertGreater(len(parsed["turns"]), 0)
+
+    def test_no_filter_is_noop(self):
+        parsed = ch.parse_session(FIXTURE)
+        n = len(parsed["turns"])
+        ch.slice_turns(parsed)
+        self.assertEqual(len(parsed["turns"]), n)
+        self.assertNotIn("slice_note", parsed)
+
+
+class ClipboardTests(unittest.TestCase):
+    def test_copies_via_first_available_tool(self):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["input"] = kwargs.get("input")
+
+            class P:
+                returncode = 0
+            return P()
+
+        with unittest.mock.patch.object(ch.subprocess, "run", fake_run), \
+                unittest.mock.patch.object(
+                    ch.shutil, "which",
+                    lambda name: "/usr/bin/pbcopy" if name == "pbcopy"
+                    else None):
+            tool = ch._copy_clipboard("hello doc")
+        self.assertEqual(tool, "pbcopy")
+        self.assertEqual(captured["input"], "hello doc")
+
+    def test_errors_when_no_tool(self):
+        with unittest.mock.patch.object(ch.shutil, "which", lambda _: None):
+            with self.assertRaises(SystemExit):
+                ch._copy_clipboard("x")
+
+
+class HookTests(unittest.TestCase):
+    def test_install_is_idempotent_and_uninstall_removes(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            sp = Path(td) / "settings.json"
+            sp.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                ch.install_hook(settings_path=sp)
+                ch.install_hook(settings_path=sp)          # idempotent
+            data = json.loads(sp.read_text(encoding="utf-8"))
+            self.assertEqual(data["model"], "opus")        # untouched
+            entries = data["hooks"]["SessionEnd"]
+            cmds = [h["command"] for e in entries for h in e["hooks"]]
+            self.assertEqual(cmds.count(ch.HOOK_COMMAND), 1)
+            with contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                ch.install_hook(settings_path=sp, remove=True)
+            data = json.loads(sp.read_text(encoding="utf-8"))
+            self.assertNotIn("SessionEnd", data.get("hooks", {}))
+
+    def test_malformed_settings_never_clobbered(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            sp = Path(td) / "settings.json"
+            sp.write_text("{not json", encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                ch.install_hook(settings_path=sp)
+            self.assertEqual(sp.read_text(encoding="utf-8"), "{not json")
+
+
+class OllamaTests(unittest.TestCase):
+    def test_call_hits_local_endpoint(self):
+        captured = {}
+
+        def fake_http(url, payload, headers):
+            captured["url"] = url
+            captured["payload"] = payload
+            return {"choices": [{"message": {"content": "local summary"}}]}
+
+        import contextlib
+        import io
+        with unittest.mock.patch.object(ch, "http_json", fake_http), \
+                contextlib.redirect_stderr(io.StringIO()):
+            out = ch.llm_summarize("ollama", None, "tiny transcript")
+        self.assertEqual(out, "local summary")
+        self.assertIn("localhost:11434", captured["url"])
+        self.assertEqual(captured["payload"]["model"],
+                         ch.PROVIDERS["ollama"]["default_model"])
+
+    def test_connection_error_mentions_ollama_serve(self):
+        def fake_http(url, payload, headers):
+            raise SystemExit("LLM API unreachable: connection refused")
+
+        import contextlib
+        import io
+        with unittest.mock.patch.object(ch, "http_json", fake_http), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                ch.llm_summarize("ollama", None, "x")
+        self.assertIn("ollama serve", str(cm.exception))
 
 
 class ZeroTrustTests(unittest.TestCase):

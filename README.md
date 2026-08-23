@@ -27,10 +27,22 @@ claude-handoff --name "login bug"  # newest session whose title/prompt matches
 claude-handoff "login bug"         # same — a non-path argument is a name search
 claude-handoff --project myrepo    # latest session of a specific project
 claude-handoff path/to/session.jsonl -o -     # explicit file → stdout
+claude-handoff -o clipboard        # straight to the clipboard — go paste it
+claude-handoff --last 5            # only the last 5 user turns
+claude-handoff --since 2h          # only the last 2 hours of the session
 claude-handoff --include-tools     # keep collapsed per-tool-call detail
+claude-handoff --include-sidechains  # append subagent (sidechain) work
+
+# claude.ai web chats too — Settings → Privacy → Export data:
+claude-handoff conversations.json --list
+claude-handoff conversations.json --name "webhook bug"
+
+# auto-handoff: write one for every session when it ends
+claude-handoff --install-hook
 
 # real LLM summary (goal / decisions / current state / next steps):
 claude-handoff --llm claude-cli                 # uses your Claude Code login — no API key
+claude-handoff --llm ollama                     # local model — fully offline
 export ANTHROPIC_API_KEY=sk-...
 claude-handoff --llm claude
 claude-handoff --llm openai --model gpt-4o
@@ -70,9 +82,13 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 
 | Flag | Meaning |
 |---|---|
-| `--list` | list sessions (date, size, project, title · first prompt) |
-| `--name QUERY` | pick newest session whose title or first prompt contains QUERY |
+| `--list` | list sessions (date, size, project, title · first prompt); with a `conversations.json`, list its chats |
+| `--name QUERY` | pick newest session (or web conversation) whose title/first prompt contains QUERY |
 | `--project NAME` | pick latest session whose project path contains NAME |
+| `--last N` / `--since 2h` | keep only the tail of the conversation (N user turns / a time window) |
+| `-o clipboard` | copy the handoff straight to the clipboard |
+| `--include-sidechains` | append a section with subagent (sidechain) work |
+| `--install-hook` / `--uninstall-hook` | auto-write a handoff to `~/.claude/handoffs/` when each session ends |
 | `-o FILE` / `-o -` | output file / stdout (default `handoff.md`) |
 | `--include-tools` | collapsed `<details>` blocks with each tool call |
 | `--max-chars N` | cap the transcript section (default 80 000; keeps start + recent end) |
@@ -92,6 +108,7 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 | `openai` | `OPENAI_API_KEY` or `GPT_API` | OpenAI API |
 | `gemini` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` or `GEMINI_API` | Google AI API |
 | `claude-cli` | *(none)* | Shells out to your installed [Claude Code](https://claude.ai/code) CLI; billed to your Pro/Max plan. Run `claude` once to log in. |
+| `ollama` | *(none — local)* | Local [Ollama](https://ollama.com) server: fully offline, nothing leaves your machine. `OLLAMA_MODEL` / `OLLAMA_BASE_URL` to configure. |
 
 Nothing is sent anywhere unless you pass `--llm`.
 
@@ -105,9 +122,10 @@ Nothing is sent anywhere unless you pass `--llm`.
 
 ## Roadmap
 
-- claude.ai web chat exports (`conversations.json` from the official data export) as input
 - ChatGPT / Gemini exports as input (handoff in *both* directions)
 - `--format json` for programmatic use
+- Parallel chunk summarization for API providers
+- Project-wide handoff (`--project X --merge`) across sessions
 
 PRs welcome.
 

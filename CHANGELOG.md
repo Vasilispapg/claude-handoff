@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.0 — 2026-08-23
+
+- **claude.ai web chats as input**: point it at the `conversations.json`
+  from the official data export (Settings → Privacy → Export data);
+  `--list` lists the chats, `--name` picks one, newest by default.
+- **`-o clipboard`**: copy the handoff straight to the clipboard
+  (pbcopy / wl-copy / xclip / clip).
+- **`--last N` and `--since 2h|45m|1d|ISO`**: export only the tail of a
+  conversation, with an honest "showing the last X of Y user turns" note.
+- **Auto-handoff hook**: `--install-hook` adds a Claude Code SessionEnd
+  hook that writes a deterministic handoff to `~/.claude/handoffs/` when
+  each session ends (nearly-empty sessions skipped; never breaks the host
+  session). `--uninstall-hook` removes it; existing settings preserved.
+- **`--llm ollama`**: summaries via a local Ollama server — fully
+  offline, nothing leaves the machine. `OLLAMA_MODEL`, `OLLAMA_BASE_URL`.
+- **`--include-sidechains`**: append subagent (sidechain) work as its own
+  section instead of dropping it.
+
 ## 0.5.0 — 2026-08-23
 
 - **Live progress display** for `--llm` runs in a terminal: progress bar,

@@ -1,0 +1,31 @@
+[
+  {
+    "uuid": "web-conv-001",
+    "name": "Debug payment webhook",
+    "created_at": "2026-08-19T10:00:00Z",
+    "updated_at": "2026-08-19T10:30:00Z",
+    "chat_messages": [
+      {"uuid": "m1", "sender": "human", "created_at": "2026-08-19T10:00:00Z",
+       "text": "το webhook της πληρωμής επιστρέφει 500, τι φταίει;"},
+      {"uuid": "m2", "sender": "assistant", "created_at": "2026-08-19T10:01:00Z",
+       "content": [{"type": "text", "text": "Στείλε μου το payload και το traceback."}]},
+      {"uuid": "m3", "sender": "human", "created_at": "2026-08-19T10:02:00Z",
+       "text": "ορίστε το log",
+       "attachments": [{"file_name": "webhook.log"}]},
+      {"uuid": "m4", "sender": "assistant", "created_at": "2026-08-19T10:03:00Z",
+       "content": [{"type": "text", "text": "Το signature validation αποτυγχάνει — λάθος endpoint secret."}]}
+    ]
+  },
+  {
+    "uuid": "web-conv-002",
+    "name": "Trip planning notes",
+    "created_at": "2026-08-21T09:00:00Z",
+    "updated_at": "2026-08-21T09:05:00Z",
+    "chat_messages": [
+      {"uuid": "m5", "sender": "human", "created_at": "2026-08-21T09:00:00Z",
+       "text": "φτιάξε μου πλάνο για 3 μέρες Κρήτη"},
+      {"uuid": "m6", "sender": "assistant", "created_at": "2026-08-21T09:01:00Z",
+       "text": "Μέρα 1: Ηράκλειο και Κνωσός..."}
+    ]
+  }
+]

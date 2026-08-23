@@ -35,10 +35,10 @@ import threading
 import time
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -209,6 +209,91 @@ def list_sessions(project_filter: str | None) -> None:
 #  Parsing
 # --------------------------------------------------------------------------- #
 
+def is_web_export(path: Path) -> bool:
+    """True for a claude.ai data export (conversations.json): a .json file
+    whose first non-whitespace byte opens a JSON array."""
+    if path.suffix.lower() != ".json":
+        return False
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            head = fh.read(64).lstrip()
+        return head.startswith("[")
+    except OSError:
+        return False
+
+
+def _web_message_text(msg: dict) -> str:
+    text = msg.get("text")
+    if not text:
+        content = msg.get("content")
+        if isinstance(content, list):
+            text = "\n".join(b.get("text", "") for b in content
+                             if isinstance(b, dict) and b.get("type") == "text")
+    text = (text or "").strip()
+    if msg.get("attachments") or msg.get("files"):
+        text = (text + "\n\n[attachment]").strip()
+    return text
+
+
+def _load_web_conversations(path: Path) -> list[dict]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"Cannot read claude.ai export {path}: {e}") from e
+    return [c for c in data if isinstance(c, dict)] if isinstance(data, list) \
+        else []
+
+
+def parse_claude_export(path: Path, name_filter: str | None = None) -> dict:
+    """Parse a claude.ai data export into the same shape as parse_session.
+
+    Picks the newest conversation, or the newest whose title matches
+    `name_filter` (case-insensitive substring).
+    """
+    convos = _load_web_conversations(path)
+    if name_filter:
+        q = name_filter.lower()
+        convos = [c for c in convos if q in str(c.get("name", "")).lower()]
+    if not convos:
+        raise SystemExit(
+            f"No conversation{f' matching {name_filter!r}' if name_filter else ''} "
+            f"in {path}. Run with --list to see the conversations it holds.")
+    convo = max(convos, key=lambda c: str(c.get("updated_at") or
+                                          c.get("created_at") or ""))
+
+    state = _new_parse_state()
+    meta = state["meta"]
+    meta["session_id"] = convo.get("uuid")
+    if convo.get("name"):
+        meta["summaries"].append(convo["name"])
+    for msg in convo.get("chat_messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        text = _web_message_text(msg)
+        if not text:
+            continue
+        role = "user" if msg.get("sender") == "human" else "assistant"
+        meta["n_user" if role == "user" else "n_assistant"] += 1
+        ts = msg.get("created_at")
+        meta["first_ts"] = meta["first_ts"] or ts
+        meta["last_ts"] = ts or meta["last_ts"]
+        state["turns"].append({"role": role, "text_parts": [text],
+                               "tools": [], "ts": ts})
+    state.pop("_tool_names")
+    state.pop("sidechains", None)
+    return state
+
+
+def list_export_conversations(path: Path) -> None:
+    for c in sorted(_load_web_conversations(path),
+                    key=lambda c: str(c.get("updated_at") or ""),
+                    reverse=True):
+        when = fmt_ts(c.get("updated_at") or c.get("created_at"))
+        n = len(c.get("chat_messages") or [])
+        print(f"{when}  {n:>4} msgs  {str(c.get('uuid', '?'))[:8]}  "
+              f"{one_line(str(c.get('name') or '(untitled)'), 70)}")
+
+
 def load_records(path: Path) -> list[dict]:
     records = []
     with path.open(encoding="utf-8", errors="replace") as fh:
@@ -311,10 +396,11 @@ def _new_parse_state() -> dict:
             "last_ts": None, "n_user": 0, "n_assistant": 0, "n_tools": 0,
             "summaries": [],
         },
-        "turns": [],            # {"role", "text_parts", "tools"}
+        "turns": [],            # {"role", "text_parts", "tools", "ts"}
         "files_written": {},    # path -> edit count
         "files_read": {},       # path -> read count
         "commands": [],
+        "sidechains": [],       # {"prompt", "texts"} — subagent branches
         "_tool_names": {},      # tool_use_id -> tool name (internal)
     }
 
@@ -378,6 +464,7 @@ def _handle_assistant_record(rec: dict, state: dict) -> None:
     if not isinstance(content, list):
         return
     turn = _current_assistant_turn(state)
+    turn.setdefault("ts", rec.get("timestamp"))
     added_text = False
     for block in content:
         if not isinstance(block, dict):
@@ -414,13 +501,35 @@ def _handle_user_record(rec: dict, state: dict) -> None:
                     state["meta"]["n_user"] += 1
                     state["turns"].append({"role": "user",
                                            "text_parts": [answer],
-                                           "tools": []})
+                                           "tools": [],
+                                           "ts": rec.get("timestamp")})
         return
     text = clean_text(user_text(message))
     if not text:
         return
     state["meta"]["n_user"] += 1
-    state["turns"].append({"role": "user", "text_parts": [text], "tools": []})
+    state["turns"].append({"role": "user", "text_parts": [text],
+                           "tools": [], "ts": rec.get("timestamp")})
+
+
+def _handle_sidechain_record(rec: dict, state: dict) -> None:
+    """Collect subagent-branch content for --include-sidechains."""
+    message = rec.get("message") or {}
+    groups = state["sidechains"]
+    if rec.get("type") == "user":
+        text = clean_text(user_text(message))
+        if text:  # a subagent's task prompt starts a new group
+            groups.append({"prompt": one_line(text, 120), "texts": []})
+        return
+    content = message.get("content")
+    if not isinstance(content, list):
+        return
+    if not groups:
+        groups.append({"prompt": None, "texts": []})
+    for block in content:
+        if (isinstance(block, dict) and block.get("type") == "text"
+                and block.get("text", "").strip()):
+            groups[-1]["texts"].append(block["text"].strip())
 
 
 def parse_session(path: Path) -> dict:
@@ -430,7 +539,10 @@ def parse_session(path: Path) -> dict:
         rtype = rec.get("type")
         if rtype == "summary" and rec.get("summary"):
             state["meta"]["summaries"].append(rec["summary"])
-        elif rtype in ("user", "assistant") and not rec.get("isSidechain"):
+        elif rtype in ("user", "assistant"):
+            if rec.get("isSidechain"):
+                _handle_sidechain_record(rec, state)
+                continue
             _update_envelope_meta(rec, state["meta"])
             if rtype == "assistant":
                 _handle_assistant_record(rec, state)
@@ -443,6 +555,60 @@ def parse_session(path: Path) -> dict:
                       if t["text_parts"] or t["tools"]]
     state.pop("_tool_names")
     return state
+
+
+def _parse_ts(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.astimezone()
+
+
+def _since_cutoff(spec: str, last_ts: str | None) -> datetime:
+    """'2h'/'30m'/'1d' → that long before the session's end; else an ISO
+    timestamp."""
+    m = re.fullmatch(r"(\d+)\s*([mhd])", spec.strip())
+    if m:
+        amount = int(m.group(1))
+        unit = {"m": "minutes", "h": "hours", "d": "days"}[m.group(2)]
+        base = _parse_ts(last_ts) or datetime.now(timezone.utc)
+        return base - timedelta(**{unit: amount})
+    cutoff = _parse_ts(spec)
+    if cutoff is None:
+        raise SystemExit(f"Cannot parse --since {spec!r}: use e.g. 2h, 45m, "
+                         f"1d, or an ISO timestamp like 2026-08-23T18:00.")
+    return cutoff
+
+
+def slice_turns(parsed: dict, last: int | None = None,
+                since: str | None = None) -> dict:
+    """Keep only the tail of the conversation: everything after a time
+    cutoff (--since) and/or from the Nth-from-last user turn (--last)."""
+    turns = parsed["turns"]
+    total_user = parsed["meta"]["n_user"]
+    start = 0
+    if since:
+        cutoff = _since_cutoff(since, parsed["meta"]["last_ts"])
+        start = len(turns)
+        for idx, turn in enumerate(turns):
+            ts = _parse_ts(turn.get("ts"))
+            if ts and ts >= cutoff:
+                start = idx
+                break
+    if last is not None:
+        user_idx = [i for i, t in enumerate(turns) if t["role"] == "user"]
+        if len(user_idx) > last:
+            start = max(start, user_idx[-last]) if last else len(turns)
+    if start:
+        kept = turns[start:]
+        n_user = sum(1 for t in kept if t["role"] == "user")
+        parsed["turns"] = kept
+        parsed["slice_note"] = (f"showing the last {n_user} of {total_user} "
+                                f"user turns")
+    return parsed
 
 
 # --------------------------------------------------------------------------- #
@@ -472,8 +638,12 @@ def render_header(parsed: dict, source: Path) -> str:
         "",
         "## Session",
         "",
-        f"- **Project:** `{m['cwd'] or '?'}`" +
-        (f" (branch `{m['git_branch']}`)" if m["git_branch"] else ""),
+    ]
+    if m["cwd"]:
+        lines.append(f"- **Project:** `{m['cwd']}`" +
+                     (f" (branch `{m['git_branch']}`)" if m["git_branch"]
+                      else ""))
+    lines += [
         f"- **When:** {fmt_ts(m['first_ts'])} → {fmt_ts(m['last_ts'])}",
         f"- **Assistant model:** {models}",
         f"- **Activity:** {m['n_user']} user messages, "
@@ -529,6 +699,8 @@ def render_transcript(parsed: dict, include_tools: bool,
             if parts:
                 blocks.append("### 🤖 Assistant\n\n" + "\n\n".join(parts))
 
+    if parsed.get("slice_note"):
+        blocks.insert(0, f"_[{parsed['slice_note']}]_")
     body = "\n\n".join(blocks)
     if len(body) > max_chars:
         # Keep the opening (goal-setting) and the recent end (current state).
@@ -541,17 +713,33 @@ def render_transcript(parsed: dict, include_tools: bool,
     return "## Conversation\n\n" + body
 
 
+def render_sidechains(parsed: dict, max_each: int = 2000) -> str:
+    groups = [g for g in parsed.get("sidechains", []) if g["texts"]]
+    if not groups:
+        return ""
+    out = ["## Subagent work (sidechains)", ""]
+    for g in groups:
+        prompt = g["prompt"] or "(task prompt not recorded)"
+        out.append(f"### Subagent: {prompt}")
+        out.append("")
+        out.append(truncate("\n\n".join(g["texts"]), max_each))
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
 def render_footer() -> str:
     return ("---\n\n_Exported with [claude-handoff]"
             "(https://github.com/Vasilispapg/claude-handoff) — continue from here._")
 
 
 def build_deterministic(parsed: dict, source: Path, include_tools: bool,
-                        max_chars: int) -> str:
+                        max_chars: int,
+                        include_sidechains: bool = False) -> str:
     sections = [
         render_header(parsed, source),
         render_activity(parsed),
         render_transcript(parsed, include_tools, max_chars),
+        render_sidechains(parsed) if include_sidechains else "",
         render_footer(),
     ]
     return "\n\n".join(s for s in sections if s.strip()) + "\n"
@@ -682,6 +870,28 @@ def _call_claude_cli(key: str | None, model: str | None, prompt: str) -> str:
     return result
 
 
+def _call_ollama(key: str | None, model: str, prompt: str) -> str:
+    """Local Ollama server (OpenAI-compatible endpoint) — fully offline
+    summaries; nothing leaves the machine."""
+    base = os.environ.get("OLLAMA_BASE_URL",
+                          "http://localhost:11434/v1").rstrip("/")
+    headers = {}
+    token = os.environ.get("OLLAMA_API_KEY")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        data = http_json(
+            f"{base}/chat/completions",
+            {"model": model, "stream": False,
+             "messages": [{"role": "user", "content": prompt}]},
+            headers)
+    except SystemExit as e:
+        raise SystemExit(
+            f"{e} — is Ollama running? Start it with `ollama serve` "
+            f"(endpoint: {base}, override with OLLAMA_BASE_URL).") from e
+    return data["choices"][0]["message"]["content"]
+
+
 # Each provider: accepted key env vars (first hit wins, graphify-style;
 # empty tuple = no key needed), a default model (None = provider decides),
 # and the call strategy. Adding a provider touches nothing but this table.
@@ -705,6 +915,11 @@ PROVIDERS.update({
         "env_keys": (),
         "default_model": None,
         "call": _call_claude_cli,
+    },
+    "ollama": {
+        "env_keys": (),  # local server; OLLAMA_API_KEY only if you set one
+        "default_model": os.environ.get("OLLAMA_MODEL", "llama3.1"),
+        "call": _call_ollama,
     },
 })
 
@@ -944,6 +1159,100 @@ def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
 #  CLI
 # --------------------------------------------------------------------------- #
 
+def _copy_clipboard(text: str) -> str:
+    """Copy text to the system clipboard; returns the tool used."""
+    for cmd in (["pbcopy"], ["wl-copy"],
+                ["xclip", "-selection", "clipboard"], ["clip"]):
+        if shutil.which(cmd[0]):
+            proc = subprocess.run(cmd, input=text, text=True,
+                                  encoding="utf-8", check=False)
+            if proc.returncode == 0:
+                return cmd[0]
+    raise SystemExit("No clipboard tool found — expected pbcopy (macOS), "
+                     "wl-copy/xclip (Linux) or clip (Windows).")
+
+
+# ------------------------------------------------------------------------- #
+#  Auto-handoff hook (claude-handoff --install-hook)
+# ------------------------------------------------------------------------- #
+
+HOOK_COMMAND = "claude-handoff --hook-stdin"
+HANDOFFS_DIR = Path(os.environ.get("CLAUDE_HOME",
+                                   str(Path.home() / ".claude"))) / "handoffs"
+
+
+def install_hook(settings_path: Path | None = None,
+                 remove: bool = False) -> None:
+    """Add (or remove) a SessionEnd hook in Claude Code's settings.json so
+    every session leaves a handoff in ~/.claude/handoffs automatically."""
+    settings_path = settings_path or (
+        Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
+        / "settings.json")
+    settings: dict = {}
+    if settings_path.is_file():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except ValueError as e:
+            raise SystemExit(
+                f"{settings_path} is not valid JSON ({e}) — fix it first; "
+                f"refusing to overwrite it.") from e
+    hooks = settings.setdefault("hooks", {})
+    entries = hooks.setdefault("SessionEnd", [])
+
+    def _is_ours(h: dict) -> bool:
+        return h.get("command") == HOOK_COMMAND
+
+    if remove:
+        for entry in entries:
+            entry["hooks"] = [h for h in entry.get("hooks", [])
+                              if not _is_ours(h)]
+        hooks["SessionEnd"] = [e for e in entries if e.get("hooks")]
+        if not hooks["SessionEnd"]:
+            del hooks["SessionEnd"]
+        if not hooks:
+            del settings["hooks"]
+        action = "removed from"
+    else:
+        present = any(_is_ours(h) for e in entries
+                      for h in e.get("hooks", []))
+        if not present:
+            entries.append({"hooks": [{"type": "command",
+                                       "command": HOOK_COMMAND}]})
+        action = "installed in"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(settings, indent=2,
+                                        ensure_ascii=False) + "\n",
+                             encoding="utf-8")
+    print(f"Auto-handoff hook {action} {settings_path}.", file=sys.stderr)
+    if not remove:
+        print(f"Every Claude Code session now writes a handoff to "
+              f"{HANDOFFS_DIR}/<session>.md when it ends.\n"
+              f"Undo with: claude-handoff --uninstall-hook", file=sys.stderr)
+
+
+def run_hook_mode() -> None:
+    """SessionEnd hook entrypoint: reads Claude Code's hook JSON on stdin,
+    writes a deterministic handoff for that session. Silent on problems —
+    a hook must never break the host session."""
+    try:
+        payload = json.load(sys.stdin)
+        transcript = Path(payload["transcript_path"])
+        if not transcript.is_file():
+            return
+        parsed = parse_session(transcript)
+        if not parsed["turns"] or looks_trivial(parsed):
+            return
+        HANDOFFS_DIR.mkdir(parents=True, exist_ok=True)
+        out = HANDOFFS_DIR / f"{transcript.stem}.md"
+        out.write_text(build_deterministic(parsed, transcript,
+                                           include_tools=False,
+                                           max_chars=DEFAULT_MAX_CHARS),
+                       encoding="utf-8")
+        print(f"handoff written: {out}")
+    except Exception:  # noqa: BLE001 — deliberately swallow: see docstring
+        return
+
+
 class _HelpfulParser(argparse.ArgumentParser):
     """argparse's designed extension point: on any usage error, point the
     user at --help and --list instead of leaving them with a bare error."""
@@ -983,6 +1292,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="output file, or '-' for stdout (default: handoff.md)")
     ap.add_argument("--include-tools", action="store_true",
                     help="include collapsed per-tool-call detail in transcript")
+    ap.add_argument("--include-sidechains", action="store_true",
+                    help="append a section with subagent (sidechain) work")
+    ap.add_argument("--last", type=int, metavar="N",
+                    help="keep only the last N user turns")
+    ap.add_argument("--since", metavar="WHEN",
+                    help="keep only turns after WHEN: 2h, 45m, 1d (before "
+                         "session end) or an ISO timestamp")
+    ap.add_argument("--install-hook", action="store_true",
+                    help="auto-write a handoff when every Claude Code "
+                         "session ends (SessionEnd hook)")
+    ap.add_argument("--uninstall-hook", action="store_true",
+                    help="remove the auto-handoff hook")
+    ap.add_argument("--hook-stdin", action="store_true",
+                    help=argparse.SUPPRESS)
     ap.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS,
                     help=f"cap transcript section size (default {DEFAULT_MAX_CHARS})")
     ap.add_argument("--llm", choices=sorted(PROVIDERS),
@@ -1088,12 +1411,20 @@ def build_document(parsed: dict, source: Path,
                          focus=args.focus, redact=not args.no_redact,
                          use_cache=not args.no_cache)
     return build_deterministic(parsed, source, args.include_tools,
-                               args.max_chars)
+                               args.max_chars,
+                               include_sidechains=args.include_sidechains)
 
 
 def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
     if args.output == "-":
         sys.stdout.write(doc)
+        return
+    if args.output in ("clipboard", "clip"):
+        tool = _copy_clipboard(doc)
+        print(f"Copied to clipboard via {tool} ({len(doc):,} chars, "
+              f"{parsed['meta']['n_user']} user messages"
+              f"{', LLM-summarized' if args.llm else ''}) — paste away.",
+              file=sys.stderr)
         return
     out = Path(args.output)
     out.write_text(doc, encoding="utf-8")
@@ -1104,13 +1435,29 @@ def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
+    if args.hook_stdin:
+        run_hook_mode()
+        return
+    if args.install_hook or args.uninstall_hook:
+        install_hook(remove=args.uninstall_hook)
+        return
     if args.list:
-        list_sessions(args.project)
+        if args.session and is_web_export(Path(args.session).expanduser()):
+            list_export_conversations(Path(args.session).expanduser())
+        else:
+            list_sessions(args.project)
         return
     source = resolve_source(args)
-    parsed = parse_session(source)
+    if is_web_export(source):
+        parsed = parse_claude_export(source, name_filter=args.name)
+    else:
+        parsed = parse_session(source)
     if not parsed["turns"]:
         raise SystemExit("Session parsed but contains no conversation turns.")
+    slice_turns(parsed, last=args.last, since=args.since)
+    if not parsed["turns"]:
+        raise SystemExit("Nothing left after --last/--since — widen the "
+                         "range or drop the filter.")
     write_output(build_document(parsed, source, args), parsed, args)
 
 

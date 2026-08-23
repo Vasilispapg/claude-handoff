@@ -45,7 +45,14 @@ pip install -e . && claude-handoff --version  # packaging check
 ## Architecture map (claude_handoff.py)
 
 - Discovery: `find_sessions`, `session_label` (title + first prompt),
-  `find_session_by_name`, `list_sessions`
+  `find_session_by_name`, `list_sessions`, `cwd_project_filter`
+- Web-export input: `is_web_export`, `parse_claude_export` (same parsed
+  shape as `parse_session`), `list_export_conversations`
+- Tail filters: `slice_turns` (`--last`, `--since`), `_since_cutoff`
+- Hook: `install_hook` / `run_hook_mode` (`--install-hook`,
+  `--hook-stdin`) — hook mode swallows all errors by design: a hook must
+  never break the host Claude Code session. Sidechains:
+  `_handle_sidechain_record`, `render_sidechains`.
 - Parsing: `parse_session` (coordinator) + single-responsibility helpers
   `_handle_assistant_record`, `_handle_user_record`, `_handle_tool_use`,
   `_update_envelope_meta`; text utils `user_text`, `tool_result_text`,

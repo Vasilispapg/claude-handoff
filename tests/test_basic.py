@@ -350,6 +350,79 @@ COMPACTED = ROOT / "tests" / "fixtures" / "compacted_session.jsonl"
 CHATGPT_EXPORT = ROOT / "tests" / "fixtures" / "chatgpt_export.json"
 
 
+class PickerTests(unittest.TestCase):
+    def test_interactive_pick_by_number(self):
+        import contextlib
+        import io
+        with unittest.mock.patch.object(ch, "find_sessions",
+                                        lambda *a, **k: [TRIVIAL, FIXTURE]), \
+                unittest.mock.patch.object(ch.sys.stdin, "isatty",
+                                           lambda: True), \
+                unittest.mock.patch.object(ch.sys.stderr, "isatty",
+                                           lambda: True, create=True), \
+                unittest.mock.patch("builtins.input",
+                                    side_effect=["nope", "2"]), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ch.interactive_pick(None), FIXTURE)
+
+    def test_interactive_needs_terminal(self):
+        with unittest.mock.patch.object(ch, "find_sessions",
+                                        lambda *a, **k: [FIXTURE]), \
+                unittest.mock.patch.object(ch.sys.stdin, "isatty",
+                                           lambda: False):
+            with self.assertRaises(SystemExit):
+                ch.interactive_pick(None)
+
+
+class CompletionsTests(unittest.TestCase):
+    def test_completions_cover_flags(self):
+        import contextlib
+        import io
+        for shell in ("bash", "zsh"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ch.print_completions(shell)
+            out = buf.getvalue()
+            for flag in ("--llm", "--merge", "--focus", "--list"):
+                self.assertIn(flag, out)
+            self.assertIn("complete -W", out)
+
+
+class McpTests(unittest.TestCase):
+    def test_stdio_server_initialize_list_call(self):
+        import subprocess as sp
+        req = "\n".join([
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": {"protocolVersion": "2025-06-18"}}),
+            json.dumps({"jsonrpc": "2.0",
+                        "method": "notifications/initialized"}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+            json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                        "params": {"name": "handoff",
+                                   "arguments": {"path": str(FIXTURE),
+                                                 "last": 1}}}),
+            json.dumps({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                        "params": {"name": "handoff",
+                                   "arguments": {"path": "/nope.jsonl"}}}),
+        ]) + "\n"
+        proc = sp.run(
+            [sys.executable, str(ROOT / "claude_handoff.py"), "--mcp"],
+            input=req, capture_output=True, text=True, encoding="utf-8",
+            timeout=60, env={**os.environ, "PYTHONUTF8": "1"})
+        replies = {m["id"]: m for m in
+                   (json.loads(l) for l in proc.stdout.splitlines()
+                    if l.strip())}
+        self.assertEqual(replies[1]["result"]["serverInfo"]["name"],
+                         "claude-handoff")
+        tools = {t["name"] for t in replies[2]["result"]["tools"]}
+        self.assertEqual(tools, {"list_sessions", "handoff"})
+        ok = replies[3]["result"]
+        self.assertFalse(ok["isError"])
+        self.assertIn("Conversation handoff", ok["content"][0]["text"])
+        self.assertIn("last 1 of 2", ok["content"][0]["text"])
+        self.assertTrue(replies[4]["result"]["isError"])
+
+
 class ChatGPTExportTests(unittest.TestCase):
     def test_detection_and_parse(self):
         self.assertTrue(ch.is_web_export(CHATGPT_EXPORT))

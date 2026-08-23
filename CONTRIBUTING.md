@@ -20,9 +20,15 @@ python3 -m unittest discover -s tests -v
 python3 claude_handoff.py tests/fixtures/classic_session.jsonl -o - --include-tools
 ```
 
+CI runs the suite on Linux, macOS and Windows (Python 3.9 and 3.13) —
+keep changes cross-platform (explicit `encoding="utf-8"` everywhere, no
+shell-specific tricks).
+
 **Scope.** Good PR targets: new session flavors (fixtures + parser fixes),
-claude.ai `conversations.json` input, `--format json`, provider fixes for
-`--llm`. Before building something large, open an issue first.
+Gemini Takeout input (bring a real, redacted export!), new `--llm`
+providers (one `_call_*` function + one `PROVIDERS` entry), MCP server
+extensions, provider fixes. Before building something large, open an
+issue first.
 
 **Style.** Match the existing code: small pure functions, type hints,
 readable top-to-bottom. Python ≥ 3.9. See `AGENTS.md` for the invariants —

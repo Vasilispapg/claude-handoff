@@ -52,6 +52,9 @@ pip install -e . && claude-handoff --version  # packaging check
   `chat_messages` AND ChatGPT `mapping`/`current_node`; same parsed shape
   as `parse_session`), `list_export_conversations`
 - Merge & formats: `merge_parsed` (session-break turns), `build_json`
+- UX & integrations: `interactive_pick` (-i), `print_completions`,
+  `run_mcp_server`/`_mcp_tools`/`_mcp_call` (--mcp; stdout carries only
+  JSON-RPC — log to stderr), `_copy_clipboard`
 - Tail filters: `slice_turns` (`--last`, `--since`), `_since_cutoff`
 - Hook: `install_hook` / `run_hook_mode` (`--install-hook`,
   `--hook-stdin`) — hook mode swallows all errors by design: a hook must

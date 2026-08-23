@@ -13,15 +13,20 @@ Claude Code stores every session locally as JSONL (`~/.claude/projects/…/*.jso
 
 ```bash
 pipx install claude-handoff        # or: pip install claude-handoff
+brew install Vasilispapg/tap/claude-handoff   # Homebrew
 # or just grab the file — it's a single stdlib-only script:
 curl -O https://raw.githubusercontent.com/Vasilispapg/claude-handoff/main/claude_handoff.py
 python3 claude_handoff.py --list
+
+# tab completion (bash or zsh):
+eval "$(claude-handoff --completions zsh)"
 ```
 
 ## Usage
 
 ```bash
 claude-handoff                     # latest session → handoff.md
+claude-handoff -i                  # pick from a numbered list
 claude-handoff --list              # what sessions do I have? (title · first prompt)
 claude-handoff --name "login bug"  # newest session whose title/prompt matches
 claude-handoff "login bug"         # same — a non-path argument is a name search
@@ -96,7 +101,10 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 | `--format md\|json` | markdown (default) or machine-readable JSON |
 | `-o clipboard` | copy the handoff straight to the clipboard |
 | `--include-sidechains` | append a section with subagent (sidechain) work |
+| `-i` / `--interactive` | pick the session from a numbered list |
 | `--install-hook` / `--uninstall-hook` | auto-write a handoff to `~/.claude/handoffs/` when each session ends |
+| `--completions bash\|zsh` | print a tab-completion snippet |
+| `--mcp` | run as an MCP server over stdio |
 | `-o FILE` / `-o -` | output file / stdout (default `handoff.md`) |
 | `--include-tools` | collapsed `<details>` blocks with each tool call |
 | `--max-chars N` | cap the transcript section (default 80 000; keeps start + recent end) |
@@ -130,11 +138,22 @@ Nothing is sent anywhere unless you pass `--llm`.
 
 Sessions with API `usage` data also get a **Tokens** line in the header (input incl. cache / output). Map-reduce chunks run **4-way parallel** on API providers (`claude`/`openai`/`gemini`); `claude-cli` and `ollama` stay sequential by design.
 
+## MCP server
+
+Any MCP client (Claude Desktop, Claude Code, …) can pull handoffs directly:
+
+```bash
+claude mcp add claude-handoff -- claude-handoff --mcp
+```
+
+Tools: `list_sessions` (what's on this machine) and `handoff` (build the
+document for a session by name/project/path). Deterministic only — an MCP
+client never triggers paid LLM calls.
+
 ## Roadmap
 
-- Gemini exports as input (Google Takeout ships HTML only — needs a careful parser)
-- Homebrew formula, shell completions
-- Interactive session picker
+- Gemini exports as input (Google Takeout ships HTML only — bring a real, redacted export to build against)
+- Live token-cost estimates per provider
 
 PRs welcome.
 

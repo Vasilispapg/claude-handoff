@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.0 — 2026-08-23
+
+- **`-i` interactive picker**: choose the session from a numbered list.
+- **`--mcp`**: minimal MCP server over stdio (newline-delimited JSON-RPC)
+  with tools `list_sessions` and `handoff` — any MCP client can pull
+  deterministic handoffs; no implicit LLM calls.
+- **`--completions bash|zsh`**: tab-completion snippet generated from the
+  live argument parser.
+- **CI matrix**: Linux + macOS + Windows × Python 3.9/3.13
+  (`PYTHONUTF8=1`).
+- **Homebrew**: `brew install Vasilispapg/tap/claude-handoff`.
+- Docs refreshed across the board (INDEX, DEVELOPMENT pipeline & limits,
+  CONTRIBUTING, module docstring) to match the current tool.
+
 ## 0.7.0 — 2026-08-23
 
 - **ChatGPT exports as input**: the OpenAI data-export

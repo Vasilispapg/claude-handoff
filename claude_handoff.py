@@ -6,19 +6,30 @@ strips the tool-call noise, and produces a single clean handoff.md you can
 paste into Gemini, GPT, another Claude — anything — so it can pick up where
 the session left off.
 
+Also reads claude.ai and ChatGPT data exports (conversations.json).
 Zero dependencies. Python 3.9+. MIT license.
 
 Usage:
     claude-handoff                      # latest session -> handoff.md
     claude-handoff --list               # list available sessions
-    claude-handoff --project myrepo     # latest session of a project
-    claude-handoff path/to/session.jsonl -o -          # explicit file -> stdout
-    claude-handoff --llm claude         # real LLM summary (needs API key in env)
+    claude-handoff -i                   # numbered interactive picker
+    claude-handoff --name "login bug"   # newest session matching a name
+    claude-handoff --project myrepo --merge   # whole project, one handoff
+    claude-handoff --last 5 -o clipboard      # recent turns -> clipboard
+    claude-handoff --llm claude-cli --focus "emphasize the API decisions"
+    claude-handoff conversations.json --name "that chat"  # web exports
+    claude-handoff --format json        # machine-readable output
+    claude-handoff --install-hook       # auto-handoff when sessions end
+    claude-handoff --mcp                # MCP server (list_sessions, handoff)
 
-API keys (only needed with --llm claude|openai|gemini):
-    ANTHROPIC_API_KEY (or CLAUDE_API) | OPENAI_API_KEY (or GPT_API)
-    GEMINI_API_KEY (or GOOGLE_API_KEY / GEMINI_API)
-No key needed for --llm claude-cli — it uses your local Claude Code login.
+LLM summaries (--llm):
+    claude-cli  -> local Claude Code login, no API key
+    ollama      -> local model, fully offline
+    claude|openai|gemini -> API keys, first set env var wins:
+        ANTHROPIC_API_KEY (or CLAUDE_API) | OPENAI_API_KEY (or GPT_API)
+        GEMINI_API_KEY (or GOOGLE_API_KEY / GEMINI_API)
+Huge sessions are map-reduced in chunks with a resume cache; secrets are
+redacted before anything leaves the machine.
 """
 
 from __future__ import annotations
@@ -39,7 +50,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -1303,6 +1314,52 @@ def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
 #  CLI
 # --------------------------------------------------------------------------- #
 
+def interactive_pick(project_filter: str | None) -> Path:
+    """Numbered session picker (-i). Terminal only."""
+    if not sys.stdin.isatty():
+        raise SystemExit("-i needs a terminal (stdin is piped) — use "
+                         "--name/--project for scripted selection.")
+    sessions = find_sessions(project_filter)[:15]
+    if not sessions:
+        raise SystemExit(f"No sessions found under {PROJECTS_DIR}.")
+    for n, p in enumerate(sessions, 1):
+        title, prompt = session_label(p)
+        label = f"{title} · {prompt}" if title else prompt
+        proj = p.parent.name.lstrip("-").replace("-", "/")
+        mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d %H:%M")
+        print(f" {n:>2}. {mtime}  {one_line(proj, 44)}\n"
+              f"      {one_line(label, 90)}", file=sys.stderr)
+    while True:
+        try:
+            choice = input(f"Pick a session [1-{len(sessions)}, q quits]: ")
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("") from None
+        choice = choice.strip().lower()
+        if choice in ("q", "quit", ""):
+            raise SystemExit("")
+        try:
+            idx = int(choice)
+            if 1 <= idx <= len(sessions):
+                return sessions[idx - 1]
+        except ValueError:
+            pass
+        print("Try a number from the list (or q).", file=sys.stderr)
+
+
+def print_completions(shell: str) -> None:
+    """Emit a shell-completion snippet (works in bash and zsh)."""
+    flags = sorted({opt for action in build_arg_parser()._actions
+                    for opt in action.option_strings})
+    words = " ".join(flags)
+    print(f"# claude-handoff completions ({shell})")
+    if shell == "zsh":
+        print("# add to ~/.zshrc:  eval \"$(claude-handoff --completions zsh)\"")
+        print("autoload -U +X bashcompinit && bashcompinit")
+    else:
+        print("# add to ~/.bashrc: eval \"$(claude-handoff --completions bash)\"")
+    print(f'complete -W "{words}" claude-handoff')
+
+
 def _copy_clipboard(text: str) -> str:
     """Copy text to the system clipboard; returns the tool used."""
     for cmd in (["pbcopy"], ["wl-copy"],
@@ -1314,6 +1371,136 @@ def _copy_clipboard(text: str) -> str:
                 return cmd[0]
     raise SystemExit("No clipboard tool found — expected pbcopy (macOS), "
                      "wl-copy/xclip (Linux) or clip (Windows).")
+
+
+# ------------------------------------------------------------------------- #
+#  MCP server mode (claude-handoff --mcp)
+# ------------------------------------------------------------------------- #
+
+MCP_PROTOCOL = "2025-06-18"
+
+
+def _mcp_tools() -> list[dict]:
+    return [
+        {"name": "list_sessions",
+         "description": "List Claude Code sessions on this machine, newest "
+                        "first: date, project, id, title and first prompt.",
+         "inputSchema": {"type": "object", "properties": {
+             "project": {"type": "string",
+                         "description": "substring filter on the project "
+                                        "path"}}}},
+        {"name": "handoff",
+         "description": "Build a clean handoff document (markdown) from a "
+                        "Claude Code session so another assistant can "
+                        "continue the work. Deterministic — no LLM calls, "
+                        "no cost.",
+         "inputSchema": {"type": "object", "properties": {
+             "name": {"type": "string",
+                      "description": "newest session whose title or first "
+                                     "prompt contains this"},
+             "project": {"type": "string"},
+             "path": {"type": "string",
+                      "description": "explicit session .jsonl path"},
+             "last": {"type": "integer",
+                      "description": "keep only the last N user turns"},
+             "include_tools": {"type": "boolean"}}}},
+    ]
+
+
+def _mcp_call(name: str, arguments: dict | None) -> str:
+    a = arguments or {}
+    if name == "list_sessions":
+        lines = []
+        for p in find_sessions(a.get("project"))[:30]:
+            title, prompt = session_label(p)
+            mtime = datetime.fromtimestamp(p.stat().st_mtime) \
+                .strftime("%Y-%m-%d %H:%M")
+            proj = p.parent.name.lstrip("-").replace("-", "/")
+            label = f"{title} · {prompt}" if title else prompt
+            lines.append(f"{mtime} | {proj} | {p.stem[:8]} | {label}")
+        return "\n".join(lines) or "No sessions found."
+    if name == "handoff":
+        if a.get("path"):
+            source = Path(str(a["path"])).expanduser()
+            if not source.is_file():
+                raise ValueError(f"not a file: {source}")
+        elif a.get("name"):
+            matches = find_session_by_name(str(a["name"]), a.get("project"))
+            if not matches:
+                raise ValueError(f"no session matches {a['name']!r}")
+            source = matches[0]
+        else:
+            sessions = find_sessions(a.get("project"))
+            if not sessions:
+                raise ValueError("no sessions found")
+            source = _newest_meaningful_session(sessions)
+        parsed = (parse_web_export(source) if is_web_export(source)
+                  else parse_session(source))
+        if not parsed["turns"]:
+            raise ValueError("session has no conversation turns")
+        if a.get("last"):
+            slice_turns(parsed, last=int(a["last"]))
+        return build_deterministic(parsed, source,
+                                   include_tools=bool(a.get("include_tools")),
+                                   max_chars=DEFAULT_MAX_CHARS)
+    raise ValueError(f"unknown tool: {name}")
+
+
+def run_mcp_server() -> None:
+    """Minimal MCP server over stdio: newline-delimited JSON-RPC 2.0.
+    stdout carries only protocol messages; logs go to stderr."""
+
+    def reply(mid, result=None, error=None) -> None:
+        if mid is None:
+            return
+        out: dict = {"jsonrpc": "2.0", "id": mid}
+        if error is not None:
+            out["error"] = error
+        else:
+            out["result"] = result
+        sys.stdout.write(json.dumps(out, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        mid, method = msg.get("id"), msg.get("method")
+        try:
+            if method == "initialize":
+                params = msg.get("params") or {}
+                reply(mid, {
+                    "protocolVersion": params.get("protocolVersion")
+                    or MCP_PROTOCOL,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "claude-handoff",
+                                   "version": __version__}})
+            elif method == "tools/list":
+                reply(mid, {"tools": _mcp_tools()})
+            elif method == "tools/call":
+                params = msg.get("params") or {}
+                try:
+                    text = _mcp_call(params.get("name"),
+                                     params.get("arguments"))
+                    reply(mid, {"content": [{"type": "text", "text": text}],
+                                "isError": False})
+                except Exception as e:  # noqa: BLE001 — tool errors → result
+                    reply(mid, {"content": [{"type": "text",
+                                             "text": f"error: {e}"}],
+                                "isError": True})
+            elif method == "ping":
+                reply(mid, {})
+            elif method is None or method.startswith("notifications/"):
+                pass
+            else:
+                reply(mid, error={"code": -32601,
+                                  "message": f"method not found: {method}"})
+        except Exception as e:  # noqa: BLE001 — protocol must never die
+            reply(mid, error={"code": -32603, "message": str(e)})
 
 
 # ------------------------------------------------------------------------- #
@@ -1449,11 +1636,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--since", metavar="WHEN",
                     help="keep only turns after WHEN: 2h, 45m, 1d (before "
                          "session end) or an ISO timestamp")
+    ap.add_argument("-i", "--interactive", action="store_true",
+                    help="pick the session from a numbered list")
     ap.add_argument("--install-hook", action="store_true",
                     help="auto-write a handoff when every Claude Code "
                          "session ends (SessionEnd hook)")
     ap.add_argument("--uninstall-hook", action="store_true",
                     help="remove the auto-handoff hook")
+    ap.add_argument("--completions", choices=["bash", "zsh"],
+                    help="print a shell-completion snippet and exit")
+    ap.add_argument("--mcp", action="store_true",
+                    help="run as an MCP server over stdio (tools: "
+                         "list_sessions, handoff)")
     ap.add_argument("--hook-stdin", action="store_true",
                     help=argparse.SUPPRESS)
     ap.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS,
@@ -1553,7 +1747,13 @@ def _newest_meaningful_session(sessions: list[Path],
 
 
 def resolve_source(args: argparse.Namespace) -> Path:
-    """The session file to export: explicit path, name match, or newest."""
+    """The session file to export: explicit path, picker, name match, or
+    newest in scope."""
+    if getattr(args, "interactive", False):
+        scope = args.project
+        if not scope and not args.any:
+            scope = cwd_project_filter()
+        return interactive_pick(scope)
     if args.session:
         source = Path(args.session).expanduser()
         if source.is_file():
@@ -1634,6 +1834,12 @@ def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
+    if args.mcp:
+        run_mcp_server()
+        return
+    if args.completions:
+        print_completions(args.completions)
+        return
     if args.hook_stdin:
         run_hook_mode()
         return

@@ -1,9 +1,10 @@
 # Development notes — what was built and how
 
-A complete account of how `claude-handoff` v0.1.0 came to be: the schema
+A complete account of how `claude-handoff` came to be — the schema
 reverse-engineering, the design decisions, the bugs hit along the way, and
 what was (and wasn't) tested. Written so a contributor — human or AI — can
-pick the project up cold.
+pick the project up cold. Sections marked with a version reflect when a
+decision landed; everything else dates to v0.1.0.
 
 ## 1. The problem
 
@@ -23,6 +24,11 @@ Instead of trusting third-party writeups, the schema was derived from a live
 session file (Claude Code v2.1.241). Method: a throwaway Python script that
 counted record `type`s, collected key frequencies, and printed one sample
 record per type.
+
+Input formats accepted today: Claude Code JSONL sessions, claude.ai data
+exports (`conversations.json`, `chat_messages` arrays), and ChatGPT data
+exports (`conversations.json`, `mapping` node graphs walked backward from
+`current_node`). The JSONL schema notes below apply to the first.
 
 Record types observed (one JSON object per line):
 
@@ -73,10 +79,16 @@ Noise conventions discovered:
 
 `claude_handoff.py`, top to bottom:
 
-1. **Discovery** — `find_sessions()` globs `~/.claude/projects/*/*.jsonl`,
-   newest first; `--project` filters by path substring; `--list` prints
-   date/size/id/project plus a best-effort first prompt (`last-prompt`
-   record, else first clean user message).
+1. **Discovery & selection** — `find_sessions()` globs
+   `~/.claude/projects/*/*.jsonl`, newest first; `--project` filters by
+   path substring, `cwd_project_filter()` scopes to the current
+   directory's project (or a parent "master folder"), `--any` disables
+   scoping. `session_label()` (title + first prompt) powers `--list`,
+   `--name` matching and the `-i` numbered picker. Auto-selection skips
+   nearly-empty sessions (`looks_trivial`) — e.g. the stub `claude /login`
+   leaves behind. Web exports (claude.ai `chat_messages`, ChatGPT
+   `mapping`/`current_node`) are detected by `is_web_export()` and parsed
+   by `parse_web_export()` into the same shape as JSONL sessions.
 2. **Parsing** — `parse_session()` is the heart: single pass over records,
    producing `meta` (session id, cwd, branch, models, timestamps, counts),
    `turns` (role + text parts + tool one-liners), `files_written/read`,
@@ -86,15 +98,36 @@ Noise conventions discovered:
    command list), `render_transcript` (🧑/🤖 turns; tools collapsed into
    `<details>` with `--include-tools`, else a `[N tool calls]` marker),
    `render_footer`.
-4. **LLM mode** — `build_llm()` feeds activity + full cleaned transcript
-   (capped at 400k chars) to `llm_summarize()` with a fixed prompt that
-   demands six sections (Goal / Key decisions / Current state / Files &
-   artifacts / Next steps / Constraints & preferences), forbids invention,
-   and answers in the user's language. `llm_summarize()` resolves the key
-   via `provider_key()` and dispatches to the provider's call strategy from
-   the `PROVIDERS` registry (`_call_claude`, `_call_openai`, `_call_gemini`
-   over `urllib`; `_call_claude_cli` over `subprocess`).
-   `--with-transcript` appends the cleaned transcript after the summary.
+4. **LLM mode** — `build_llm()` redacts secrets (`redact_secrets`), then
+   feeds activity + full cleaned transcript to `llm_summarize()` with a
+   fixed prompt that demands six sections (Goal / Key decisions / Current
+   state / Files & artifacts / Next steps / Constraints & preferences),
+   forbids invention, and answers in the user's language; `--focus` adds
+   user instructions (applied in the reduce pass only). Keys resolve via
+   `provider_key()` (aliases, first hit wins) and dispatch through the
+   `PROVIDERS` registry: `_call_claude`/`_call_openai`/`_call_gemini` over
+   `urllib`, `_call_claude_cli` over `subprocess` (env-scrubbed),
+   `_call_ollama` against a local server. Transcripts beyond
+   `LLM_INPUT_CAP` are map-reduced on turn boundaries (`_chunk_text`),
+   with a content-addressed note cache, per-chunk retry, live progress
+   bar, and 4-way parallelism for API providers (`SERIAL_PROVIDERS`
+   excluded). `--with-transcript` appends the cleaned transcript.
+
+5. **Filters & composition** — `slice_turns()` (`--last`, `--since`)
+   keeps only the conversation tail with an honest note; `merge_parsed()`
+   (`--merge`) folds every session in scope into one chronological
+   document with ⏱ session-break turns; `/compact` summaries render as
+   "📜 Compacted history"; `--include-sidechains` appends subagent work.
+
+6. **Outputs** — markdown (default), `--format json`
+   (`build_json`), `-o -` stdout, `-o clipboard` (`_copy_clipboard`).
+
+7. **Integrations** — `--install-hook` adds a Claude Code SessionEnd hook
+   (`run_hook_mode` reads the hook JSON on stdin and writes to
+   `~/.claude/handoffs/`, swallowing every error by design);
+   `--mcp` runs a stdio MCP server (`run_mcp_server`: newline-delimited
+   JSON-RPC; tools `list_sessions` and `handoff`); `--completions`
+   emits shell completion snippets.
 
 ## 5. Bugs found while dogfooding
 
@@ -138,22 +171,23 @@ text bumped the counter. Fixed with a per-record `added_text` flag.
 - **Packaging**: `pip install -e .` + `claude-handoff --version` +
   fixture run, verified in-container.
 
-## 7. Known limitations (v0.1.0)
+## 7. Known limitations
 
 - Schema drift is a *when*, not an *if*; parsing is defensive but a future
   format change can silently drop content. The fixture suite is the canary.
-- Sidechains (subagent work) are dropped entirely — their outcomes usually
-  surface in the main thread, but a `--include-sidechains` flag may be
-  warranted.
-- Images are reduced to `[image attached]`; token/cost stats (`usage`)
-  are ignored. (Compaction records ARE handled since v0.6.1:
-  `system/compact_boundary` is skipped, `isCompactSummary` user records
-  render as "📜 Compacted history" and don't count as human turns.)
-- Only two session flavors tested (classic CLI, SDK/Cowork). Hours-long
-  sessions with MCP tools and multiple compactions will find edge cases.
-- claude.ai web exports (`conversations.json`) not yet accepted as input —
-  top roadmap item, and the piece that would subsume the browser-extension
-  use case.
+- Images are reduced to `[image attached]` / `[attachment]`.
+- Gemini exports are not accepted — Google Takeout ships HTML only, with
+  no stable structure; a parser should be built fixtures-first against a
+  real export, not guessed.
+- Live-call coverage: deterministic mode, `claude-cli` (incl. a 1.5M-char
+  map-reduce) and clipboard are verified live; `ollama` and the three
+  HTTP providers are verified via mocks plus a live 401 round-trip
+  against the Anthropic API (fake key). Full paid-key summaries remain
+  spot-checked, not CI-tested.
+- The MCP server exposes deterministic handoffs only (no `--llm` — an
+  MCP client shouldn't trigger paid calls implicitly).
+- Sessions from other coding CLIs (Codex, Cursor, …) are out of scope;
+  cli-continues covers CLI→CLI moves well.
 
 ## 8. Zero-trust & failure model (v0.4.0)
 

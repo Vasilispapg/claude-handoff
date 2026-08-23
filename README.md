@@ -97,7 +97,11 @@ Nothing is sent anywhere unless you pass `--llm`.
 
 **Where does it look?** Sessions live in Claude Code's global store (`~/.claude/projects`), so you can run `claude-handoff` from anywhere. If your current directory *is* a project (or a subfolder of one), it scopes to that project's sessions; a parent "master folder" scopes to every project under it; `--any` ignores the directory entirely.
 
-**Big sessions & privacy.** Transcripts beyond one pass (~400k chars) are summarized map-reduce style: notes per chunk, then one synthesis — nothing is silently dropped, and finished chunks are cached in `~/.cache/claude-handoff` so an interrupted run resumes for free. Secret-looking strings (API keys, tokens, `password=`…) are redacted before anything is sent to an LLM.
+**Big sessions & privacy.** Transcripts beyond one pass (~400k chars) are summarized map-reduce style: notes per chunk, then one synthesis — nothing is silently dropped, and finished chunks are cached in `~/.cache/claude-handoff` so an interrupted run resumes for free. Secret-looking strings (API keys, tokens, `password=`…) are redacted before anything is sent to an LLM. In a terminal you get a live progress bar with elapsed time and an ETA:
+
+```text
+[█████████░░░░░░░░░░░░░░░] 3/9 chunks | 4m12s elapsed | ~8m left | summarizing part 4/8 (199,867 chars)…
+```
 
 ## Roadmap
 

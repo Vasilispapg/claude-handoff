@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 — 2026-08-23
+
+- **Live progress display** for `--llm` runs in a terminal: progress bar,
+  chunks done/total, elapsed time, ETA (from the average chunk duration),
+  and what is being summarized right now (with its size). Falls back to
+  plain lines when stderr is piped (CI, logs). stdout stays clean for
+  `-o -`. The reduce pass now also gets the per-chunk retry.
+
 ## 0.4.0 — 2026-08-23
 
 - **Directory-aware defaults**: run from inside a project (or a subfolder)

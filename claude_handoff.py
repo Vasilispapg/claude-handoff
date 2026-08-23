@@ -31,13 +31,14 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -746,6 +747,65 @@ def _cache_put(path: Path, notes: str) -> None:
         pass
 
 
+def _fmt_secs(seconds: float) -> str:
+    seconds = int(seconds)
+    return (f"{seconds // 60}m{seconds % 60:02d}s" if seconds >= 60
+            else f"{seconds}s")
+
+
+def _new_progress(total: int) -> dict:
+    """Progress state for the chunk loop. Interactive only when stderr is a
+    terminal; plain one-line-per-event otherwise (pipes, CI, tests)."""
+    return {"total": total, "done": 0, "start": time.time(),
+            "durations": [], "tty": sys.stderr.isatty()}
+
+
+def _draw_progress(st: dict, label: str) -> None:
+    if not st["tty"]:
+        return
+    width = 24
+    filled = int(width * st["done"] / st["total"])
+    bar = "█" * filled + "░" * (width - filled)
+    eta = ""
+    if st["durations"] and st["done"] < st["total"]:
+        avg = sum(st["durations"]) / len(st["durations"])
+        eta = f" | ~{_fmt_secs(avg * (st['total'] - st['done']))} left"
+    line = (f"[{bar}] {st['done']}/{st['total']} chunks | "
+            f"{_fmt_secs(time.time() - st['start'])} elapsed{eta} | {label}")
+    print(f"\r{line[:118]:<118}", end="", file=sys.stderr, flush=True)
+
+
+def _progress_step(st: dict, label: str, work) -> str:
+    """Run `work()` for one chunk with a live-updating stderr line (TTY) or
+    a plain printed line (non-TTY). Returns work()'s result."""
+    if not st["tty"]:
+        print(label, file=sys.stderr)
+        return work()
+    started = time.time()
+    stop = threading.Event()
+
+    def tick() -> None:
+        while not stop.wait(1.0):
+            _draw_progress(st, label)
+
+    ticker = threading.Thread(target=tick, daemon=True)
+    _draw_progress(st, label)
+    ticker.start()
+    try:
+        result = work()
+    finally:
+        stop.set()
+        ticker.join(timeout=2)
+    st["durations"].append(time.time() - started)
+    return result
+
+
+def _progress_finish(st: dict) -> None:
+    if st["tty"]:
+        _draw_progress(st, "done")
+        print(file=sys.stderr)
+
+
 def _call_with_retry(call, key: str | None, model: str | None,
                      prompt: str, attempts: int = 2) -> str:
     """One retry on provider failure — transient 429/5xx shouldn't waste a
@@ -805,12 +865,18 @@ def llm_summarize(provider: str, model: str | None, transcript: str,
 
     if len(transcript) <= LLM_INPUT_CAP:
         prompt = SUMMARY_PROMPT + extra + "\nTRANSCRIPT:\n" + transcript
-        return cfg["call"](key, model, prompt)
+        st = _new_progress(1)
+        result = _progress_step(
+            st, f"summarizing ({len(transcript):,} chars, one pass)…",
+            lambda: cfg["call"](key, model, prompt))
+        _progress_finish(st)
+        return result
 
     chunks = _chunk_text(transcript, CHUNK_CAP)
     print(f"Transcript is {len(transcript):,} chars — map-reduce over "
           f"{len(chunks)} chunks (up to {len(chunks) + 1} LLM calls).",
           file=sys.stderr)
+    st = _new_progress(len(chunks) + 1)  # + the reduce pass
     notes = []
     for i, chunk in enumerate(chunks, 1):
         # Focus is applied only in the reduce pass, so chunk notes stay
@@ -822,12 +888,16 @@ def llm_summarize(provider: str, model: str | None, transcript: str,
         if cached is not None:
             print(f"  part {i}/{len(chunks)} — cached.", file=sys.stderr)
             notes.append(cached)
+            st["done"] += 1
             continue
-        print(f"  summarizing part {i}/{len(chunks)}…", file=sys.stderr)
-        result = _call_with_retry(cfg["call"], key, model, prompt)
+        result = _progress_step(
+            st, f"summarizing part {i}/{len(chunks)} "
+                f"({len(chunk):,} chars)…",
+            lambda p=prompt: _call_with_retry(cfg["call"], key, model, p))
         if use_cache:
             _cache_put(cache_file, result)
         notes.append(result)
+        st["done"] += 1
     joined = "\n\n".join(f"[Part {i}/{len(chunks)} notes]\n{n.strip()}"
                          for i, n in enumerate(notes, 1))
     overhead = (
@@ -837,7 +907,13 @@ def llm_summarize(provider: str, model: str | None, transcript: str,
           "document:\n\nNOTES:\n")
     # Truncate only the notes — instructions and focus must never be cut.
     budget = max(LLM_INPUT_CAP - len(overhead), 1000)
-    return cfg["call"](key, model, overhead + truncate(joined, budget))
+    reduce_prompt = overhead + truncate(joined, budget)
+    result = _progress_step(
+        st, f"synthesizing final summary from {len(chunks)} parts…",
+        lambda: _call_with_retry(cfg["call"], key, model, reduce_prompt))
+    st["done"] += 1
+    _progress_finish(st)
+    return result
 
 
 def build_llm(parsed: dict, source: Path, provider: str, model: str | None,

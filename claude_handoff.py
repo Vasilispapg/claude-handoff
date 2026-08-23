@@ -35,7 +35,7 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -86,8 +86,14 @@ def find_sessions(project_filter: str | None = None,
     return sorted(sessions, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
-def first_prompt_of(path: Path) -> str:
-    """Best-effort first human prompt of a session, for --list display."""
+def session_label(path: Path) -> tuple[str | None, str]:
+    """Best-effort (title, first human prompt) of a session.
+
+    Titles come from Claude Code's own `summary` records. Reads only the
+    head of the file — stops at the first real prompt. Used by --list and
+    by name matching.
+    """
+    title = None
     try:
         with path.open(encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -95,15 +101,32 @@ def first_prompt_of(path: Path) -> str:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if rec.get("type") == "last-prompt" and rec.get("lastPrompt"):
-                    return one_line(rec["lastPrompt"], 80)
-                if rec.get("type") == "user" and not rec.get("isMeta"):
+                rtype = rec.get("type")
+                if rtype == "summary" and rec.get("summary"):
+                    title = rec["summary"]
+                elif rtype == "last-prompt" and rec.get("lastPrompt"):
+                    return title, one_line(rec["lastPrompt"], 80)
+                elif rtype == "user" and not rec.get("isMeta"):
                     text = clean_text(user_text(rec.get("message") or {}))
                     if text:
-                        return one_line(text, 80)
+                        return title, one_line(text, 80)
     except OSError:
         pass
-    return "(empty)"
+    return title, "(empty)"
+
+
+def find_session_by_name(query: str,
+                         project_filter: str | None = None) -> list[Path]:
+    """Sessions whose title, first prompt, or file name contains `query`
+    (case-insensitive), newest first."""
+    query = query.lower()
+    matches = []
+    for path in find_sessions(project_filter):
+        title, prompt = session_label(path)
+        haystack = " ".join(filter(None, (title, prompt, path.stem))).lower()
+        if query in haystack:
+            matches.append(path)
+    return matches
 
 
 def list_sessions(project_filter: str | None) -> None:
@@ -115,8 +138,10 @@ def list_sessions(project_filter: str | None) -> None:
         mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
         size_kb = p.stat().st_size // 1024
         proj = p.parent.name.lstrip("-").replace("-", "/")
+        title, prompt = session_label(p)
+        label = f"{title} · {prompt}" if title else prompt
         print(f"{mtime}  {size_kb:>6} KB  {p.stem[:8]}  {proj}")
-        print(f"                              └─ {first_prompt_of(p)}")
+        print(f"                              └─ {one_line(label, 110)}")
 
 
 # --------------------------------------------------------------------------- #
@@ -649,15 +674,36 @@ def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
 #  CLI
 # --------------------------------------------------------------------------- #
 
+class _HelpfulParser(argparse.ArgumentParser):
+    """argparse's designed extension point: on any usage error, point the
+    user at --help and --list instead of leaving them with a bare error."""
+
+    def error(self, message: str) -> None:  # noqa: D102 (argparse contract)
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: error: {message}\n"
+                     f"Run `{self.prog} --help` to see every option, or "
+                     f"`{self.prog} --list` to see your sessions.\n")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(
+    ap = _HelpfulParser(
         prog="claude-handoff",
         description="Summarize & export a Claude Code session for another LLM.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='examples:\n'
+               '  claude-handoff --list\n'
+               '  claude-handoff --name "login bug"       # newest session whose title/prompt matches\n'
+               '  claude-handoff "login bug" --llm claude-cli   # positional works as a name too\n'
+               '  claude-handoff --project myrepo -o -\n',
     )
     ap.add_argument("session", nargs="?",
-                    help="path to a session .jsonl (default: latest session)")
+                    help="path to a session .jsonl, or a name to search for "
+                         "(default: latest session)")
     ap.add_argument("--list", action="store_true",
-                    help="list available sessions and exit")
+                    help="list available sessions (title · first prompt) and exit")
+    ap.add_argument("--name", metavar="QUERY",
+                    help="pick newest session whose title or first prompt "
+                         "contains QUERY (case-insensitive)")
     ap.add_argument("--project", metavar="NAME",
                     help="pick latest session whose project path contains NAME")
     ap.add_argument("-o", "--output", default="handoff.md",
@@ -676,13 +722,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _newest_named_session(query: str, project_filter: str | None) -> Path:
+    matches = find_session_by_name(query, project_filter)
+    if not matches:
+        raise SystemExit(
+            f"No session matches {query!r}"
+            + (f" in projects matching '{project_filter}'" if project_filter
+               else "")
+            + ". Run `claude-handoff --list` to see titles and prompts.")
+    if len(matches) > 1:
+        print(f"{len(matches)} sessions match {query!r}; using the newest. "
+              f"Run --list to see all of them.", file=sys.stderr)
+    print(f"Using session: {matches[0]}", file=sys.stderr)
+    return matches[0]
+
+
 def resolve_source(args: argparse.Namespace) -> Path:
-    """The session file to export: explicit path, or newest discovered."""
+    """The session file to export: explicit path, name match, or newest."""
     if args.session:
         source = Path(args.session).expanduser()
-        if not source.is_file():
-            raise SystemExit(f"Not a file: {source}")
-        return source
+        if source.is_file():
+            return source
+        looks_like_path = "/" in args.session or args.session.endswith(".jsonl")
+        if looks_like_path:
+            raise SystemExit(f"Not a file: {source}. "
+                             f"Run `claude-handoff --list` to see sessions.")
+        return _newest_named_session(args.session, args.project)
+    if args.name:
+        return _newest_named_session(args.name, args.project)
     sessions = find_sessions(args.project)
     if not sessions:
         raise SystemExit(

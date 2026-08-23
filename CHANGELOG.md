@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 — 2026-08-23
+
+- **Pick sessions by name**: `--name QUERY` (or just
+  `claude-handoff "login bug"`) selects the newest session whose title,
+  first prompt, or file name contains QUERY, case-insensitive. Ambiguous
+  matches say how many matched and which one was used.
+- **`--list` shows session titles**: Claude Code's own session title
+  (when present) next to the first prompt — `Title · first prompt`.
+- **Helpful errors**: wrong flags and missing sessions now point to
+  `--help` and `--list` instead of a bare error; `--help` gained an
+  examples section.
+
 ## 0.2.0 — 2026-08-23
 
 - **`--llm claude-cli`**: real LLM summaries through the locally-installed

@@ -71,6 +71,55 @@ class RenderTests(unittest.TestCase):
         self.assertIn("το login σπάει"[:10], doc)   # opening survives
 
 
+class DiscoveryTests(unittest.TestCase):
+    """Session titles, find-by-name, and CLI error hints."""
+
+    def test_session_label_title_and_prompt(self):
+        title, prompt = ch.session_label(FIXTURE)
+        self.assertEqual(title, "Fix login bug in auth.py")
+        self.assertIn("login", prompt)
+
+    def test_find_session_by_name(self):
+        with unittest.mock.patch.object(ch, "find_sessions",
+                                        lambda *a, **k: [FIXTURE]):
+            self.assertEqual(ch.find_session_by_name("login BUG"), [FIXTURE])
+            self.assertEqual(ch.find_session_by_name("unicode"), [FIXTURE])
+            self.assertEqual(ch.find_session_by_name("classic_session"),
+                             [FIXTURE])
+            self.assertEqual(ch.find_session_by_name("zzz-no-match"), [])
+
+    def test_resolve_source_positional_name(self):
+        import contextlib
+        import io
+        with unittest.mock.patch.object(ch, "find_sessions",
+                                        lambda *a, **k: [FIXTURE]), \
+                contextlib.redirect_stderr(io.StringIO()):
+            args = ch.build_arg_parser().parse_args(["login bug"])
+            self.assertEqual(ch.resolve_source(args), FIXTURE)
+
+    def test_resolve_source_name_flag_no_match_mentions_list(self):
+        with unittest.mock.patch.object(ch, "find_sessions",
+                                        lambda *a, **k: [FIXTURE]):
+            args = ch.build_arg_parser().parse_args(["--name", "zzz"])
+            with self.assertRaises(SystemExit) as cm:
+                ch.resolve_source(args)
+        self.assertIn("--list", str(cm.exception))
+
+    def test_explicit_path_still_errors_as_file(self):
+        args = ch.build_arg_parser().parse_args(["missing/session.jsonl"])
+        with self.assertRaises(SystemExit) as cm:
+            ch.resolve_source(args)
+        self.assertIn("Not a file", str(cm.exception))
+
+    def test_bad_flag_points_to_help(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf), self.assertRaises(SystemExit):
+            ch.build_arg_parser().parse_args(["--bogus"])
+        self.assertIn("--help", buf.getvalue())
+
+
 class ProviderTests(unittest.TestCase):
     """API-key resolution (graphify-style env fallbacks) and claude-cli backend."""
 

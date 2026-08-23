@@ -34,7 +34,8 @@ pip install -e . && claude-handoff --version  # packaging check
 
 ## Architecture map (claude_handoff.py)
 
-- Discovery: `find_sessions`, `first_prompt_of`, `list_sessions`
+- Discovery: `find_sessions`, `session_label` (title + first prompt),
+  `find_session_by_name`, `list_sessions`
 - Parsing: `parse_session` (coordinator) + single-responsibility helpers
   `_handle_assistant_record`, `_handle_user_record`, `_handle_tool_use`,
   `_update_envelope_meta`; text utils `user_text`, `tool_result_text`,
@@ -45,8 +46,10 @@ pip install -e . && claude-handoff --version  # packaging check
   strategy per provider), `provider_key`, `_call_claude`, `_call_openai`,
   `_call_gemini`, `_call_claude_cli`, `http_json`, `llm_summarize`,
   `build_llm`, `SUMMARY_PROMPT`
-- CLI: `build_arg_parser`, `resolve_source`, `build_document`,
-  `write_output`, `main`
+- CLI: `_HelpfulParser` (the one allowed class — argparse's designed
+  extension point, so usage errors point to --help/--list),
+  `build_arg_parser`, `resolve_source` (path → name match → newest),
+  `build_document`, `write_output`, `main`
 
 **Adding an LLM provider** = one `_call_*` function + one `PROVIDERS`
 entry. Do not add if/elif provider chains anywhere (open/closed).

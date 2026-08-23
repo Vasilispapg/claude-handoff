@@ -22,7 +22,9 @@ python3 claude_handoff.py --list
 
 ```bash
 claude-handoff                     # latest session → handoff.md
-claude-handoff --list              # what sessions do I have?
+claude-handoff --list              # what sessions do I have? (title · first prompt)
+claude-handoff --name "login bug"  # newest session whose title/prompt matches
+claude-handoff "login bug"         # same — a non-path argument is a name search
 claude-handoff --project myrepo    # latest session of a specific project
 claude-handoff path/to/session.jsonl -o -     # explicit file → stdout
 claude-handoff --include-tools     # keep collapsed per-tool-call detail
@@ -66,7 +68,8 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 
 | Flag | Meaning |
 |---|---|
-| `--list` | list sessions (date, size, project, first prompt) |
+| `--list` | list sessions (date, size, project, title · first prompt) |
+| `--name QUERY` | pick newest session whose title or first prompt contains QUERY |
 | `--project NAME` | pick latest session whose project path contains NAME |
 | `-o FILE` / `-o -` | output file / stdout (default `handoff.md`) |
 | `--include-tools` | collapsed `<details>` blocks with each tool call |

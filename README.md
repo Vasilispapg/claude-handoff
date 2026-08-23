@@ -12,7 +12,7 @@ Claude Code stores every session locally as JSONL (`~/.claude/projects/…/*.jso
 ## Install
 
 ```bash
-pipx install git+https://github.com/Vasilispapg/claude-handoff
+pipx install claude-handoff        # or: pip install claude-handoff
 # or just grab the file — it's a single stdlib-only script:
 curl -O https://raw.githubusercontent.com/Vasilispapg/claude-handoff/main/claude_handoff.py
 python3 claude_handoff.py --list

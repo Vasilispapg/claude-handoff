@@ -23,6 +23,16 @@ schema notes before touching the parser.
   `claude` CLI for `--llm claude-cli`. No other subprocesses, no SDKs.
 - **Never invent transcript content.** The exporter reorganizes and
   truncates; it must not fabricate.
+- **Redact before egress.** Secret-shaped strings are stripped from
+  anything sent to an LLM (`redact_secrets`); default on.
+- **Never truncate instructions.** Size caps may trim transcripts and
+  chunk notes, never the prompt rules or the user's `--focus`.
+- **Cache is best-effort and content-addressed.** A cache failure must
+  never fail the run; bump `CACHE_VERSION` whenever `CHUNK_PROMPT`
+  changes. `--focus` goes only into the reduce pass so cached chunk
+  notes stay reusable.
+- **Chunk calls are sequential.** Parallel `claude -p` subprocesses
+  conflict; do not parallelize the map loop.
 
 ## Commands
 

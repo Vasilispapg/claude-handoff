@@ -153,7 +153,55 @@ text bumped the counter. Fixed with a per-record `added_text` flag.
   top roadmap item, and the piece that would subsume the browser-extension
   use case.
 
-## 8. Competitive positioning
+## 8. Zero-trust & failure model (v0.4.0)
+
+**Trust boundaries.** Everything the tool touches is treated as untrusted:
+
+- *JSONL input*: undocumented, drifts, may be corrupt or mid-write (live
+  sessions) — per-line `try/except`, `errors="replace"`, unknown record
+  types skipped non-fatally, nothing evaluated.
+- *Transcript content*: routinely contains secrets pasted into commands —
+  secret-shaped strings (`sk-…`, `ghp_…`, `AKIA…`, `AIza…`, JWTs, Slack
+  tokens, `KEY=value` assignments) are **redacted before any egress** to an
+  LLM (`redact_secrets`, on by default, `--no-redact` to opt out).
+  Deterministic mode never egresses anything.
+- *LLM output*: untrusted text — only ever written into markdown, never
+  executed or parsed as commands.
+- *Subprocess (`claude-cli`)*: fixed argv list (no `shell=True`), scrubbed
+  environment, hard timeout, stdout parsed strictly as JSON.
+- *Network*: only under `--llm`, only to the three hardcoded provider
+  hosts over HTTPS; keys read from env, never logged or persisted.
+- *Cache*: best-effort local files; unreadable entries ignored; a failing
+  cache can never fail a run.
+
+**Failure points & mitigations.**
+
+| Failure | Mitigation |
+|---|---|
+| Schema drift silently drops content | Defensive parse; fixture suite is the canary; add a fixture per new shape |
+| Session file being written while read | Corrupt/partial lines tolerated per line |
+| Huge sessions (1M+ tokens) | Map-reduce chunking (`CHUNK_CAP`) instead of dropping the middle; only the notes budget is ever truncated, **never the instructions or --focus** |
+| Provider 429/5xx mid-run | Per-chunk retry (one, 3s backoff) + chunk-note cache → a rerun resumes instead of re-paying |
+| `claude` CLI missing / logged out | Preflight `shutil.which`, CLI's own error surfaced verbatim (e.g. the revoked-token 401), `/login` hint |
+| Nested run inside a Claude Code session | `CLAUDE*` env scrub (keeps `CLAUDE_CODE_OAUTH_TOKEN`) |
+| `claude /login` stub becomes "latest session" | Auto-selection skips nearly-empty sessions |
+| Typos / wrong flags | `_HelpfulParser` points to `--help` / `--list` |
+| Stale or corrupt cache entries | Content-addressed keys — sha256(CACHE_VERSION, provider, model, chunk); bump `CACHE_VERSION` when `CHUNK_PROMPT` changes; `--no-cache` |
+
+**Chunk pipeline ("batches").** Chunks split on turn boundaries, processed
+sequentially (parallel `claude -p` subprocesses conflict — same reason
+graphify serializes its claude-cli backend). Each chunk note is cached
+before moving on, so an interrupted 30-chunk run redoes only what's
+missing. `--focus` is applied **only in the reduce pass** so cached chunk
+notes stay reusable across runs with different focus instructions.
+
+**Known residual risks.** Redaction is pattern-based — an exotic secret
+format can slip through (`--no-redact` exists precisely because the
+inverse — false positives — is also possible). The `--llm` providers see
+whatever survives redaction; users summarizing sensitive sessions should
+prefer `--llm claude-cli` (their own Claude account) or deterministic mode.
+
+## 9. Competitive positioning
 
 See `docs/RESEARCH.md` (gitignored, internal). Short version: exporters
 (claude-conversation-extractor, claude-code-log) stop at readable

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0 — 2026-08-23
+
+- **Directory-aware defaults**: run from inside a project (or a subfolder)
+  and "latest session" means *that project's* latest; run from a parent
+  "master folder" and it covers every project under it; `--any` ignores
+  the directory. Explicit `--project`/`--name`/paths always win.
+- **`--focus TEXT`**: extra instructions for the LLM summary ("emphasize
+  the API decisions", "answer in English", …). Applied to the synthesis
+  pass; never truncated away.
+- **Huge sessions (1M+ tokens)**: map-reduce summarization — chunk notes
+  on turn boundaries, then one synthesis. Nothing silently dropped.
+- **Chunk-note cache** (`~/.cache/claude-handoff`, content-addressed):
+  interrupted or repeated runs reuse paid-for chunk notes; `--no-cache`
+  to disable. One retry per chunk on provider errors.
+- **Secret redaction before egress** (zero-trust): API-key/token/password
+  shapes are stripped from transcripts before any `--llm` call;
+  `--no-redact` to opt out. Deterministic mode never sends anything.
+
 ## 0.3.1 — 2026-08-23
 
 - **Auto-selection skips nearly-empty sessions.** Running `claude /login`

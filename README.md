@@ -76,9 +76,13 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 | `-o FILE` / `-o -` | output file / stdout (default `handoff.md`) |
 | `--include-tools` | collapsed `<details>` blocks with each tool call |
 | `--max-chars N` | cap the transcript section (default 80 000; keeps start + recent end) |
+| `--any` | ignore the current directory; consider every project's sessions |
 | `--llm claude\|openai\|gemini\|claude-cli` | LLM summary instead of raw cleaned transcript |
 | `--model ID` | override the LLM model |
+| `--focus TEXT` | extra instructions for the summary (e.g. `--focus "emphasize the API decisions"`) |
 | `--with-transcript` | with `--llm`, also append the cleaned transcript |
+| `--no-redact` | don't strip secret-looking strings before sending to the LLM |
+| `--no-cache` | disable the chunk-note cache (`~/.cache/claude-handoff`) |
 
 **API keys** (first set variable wins per provider):
 
@@ -90,6 +94,10 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 | `claude-cli` | *(none)* | Shells out to your installed [Claude Code](https://claude.ai/code) CLI; billed to your Pro/Max plan. Run `claude` once to log in. |
 
 Nothing is sent anywhere unless you pass `--llm`.
+
+**Where does it look?** Sessions live in Claude Code's global store (`~/.claude/projects`), so you can run `claude-handoff` from anywhere. If your current directory *is* a project (or a subfolder of one), it scopes to that project's sessions; a parent "master folder" scopes to every project under it; `--any` ignores the directory entirely.
+
+**Big sessions & privacy.** Transcripts beyond one pass (~400k chars) are summarized map-reduce style: notes per chunk, then one synthesis — nothing is silently dropped, and finished chunks are cached in `~/.cache/claude-handoff` so an interrupted run resumes for free. Secret-looking strings (API keys, tokens, `password=`…) are redacted before anything is sent to an LLM.
 
 ## Roadmap
 

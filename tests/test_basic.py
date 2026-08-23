@@ -251,6 +251,167 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("authenticate", str(cm.exception))
 
 
+class CwdScopeTests(unittest.TestCase):
+    """Current-directory-aware default scoping."""
+
+    def test_encode_project_path(self):
+        self.assertEqual(ch.encode_project_path(Path("/home/vspapg/my app")),
+                         "-home-vspapg-my-app")
+
+    def test_cwd_project_filter(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            pd = Path(td)
+            (pd / "-data-work-appA").mkdir()
+            (pd / "-data-work-appB").mkdir()
+            home = Path("/data/home")
+            self.assertEqual(
+                ch.cwd_project_filter(Path("/data/work/appA"), pd, home),
+                "-data-work-appA")                      # project root
+            self.assertEqual(
+                ch.cwd_project_filter(Path("/data/work/appA/src/x"), pd, home),
+                "-data-work-appA")                      # subfolder
+            self.assertEqual(
+                ch.cwd_project_filter(Path("/data/work"), pd, home),
+                "-data-work")                           # master folder
+            self.assertIsNone(
+                ch.cwd_project_filter(Path("/somewhere/else"), pd, home))
+            self.assertIsNone(ch.cwd_project_filter(home, pd, home))
+
+    def test_any_flag_ignores_cwd_scope(self):
+        import contextlib
+        import io
+        seen = []
+
+        def fake_find(project_filter=None, projects_dir=None):
+            seen.append(project_filter)
+            return [FIXTURE]
+
+        with unittest.mock.patch.object(ch, "find_sessions", fake_find), \
+                contextlib.redirect_stderr(io.StringIO()):
+            args = ch.build_arg_parser().parse_args(["--any"])
+            ch.resolve_source(args)
+        self.assertEqual(seen, [None])
+
+
+class SummarizeTests(unittest.TestCase):
+    """--focus instructions and map-reduce chunking for huge transcripts."""
+
+    def _fake_provider(self, calls):
+        def fake_call(key, model, prompt):
+            calls.append(prompt)
+            return f"NOTES{len(calls)}"
+        return unittest.mock.patch.dict(ch.PROVIDERS["claude-cli"],
+                                        {"call": fake_call})
+
+    def test_focus_reaches_the_prompt(self):
+        calls = []
+        with self._fake_provider(calls):
+            out = ch.llm_summarize("claude-cli", None, "tiny transcript",
+                                   focus="Focus on the auth bug")
+        self.assertEqual(out, "NOTES1")
+        self.assertIn("Focus on the auth bug", calls[0])
+        self.assertIn("tiny transcript", calls[0])
+
+    def test_huge_transcript_is_map_reduced(self):
+        import contextlib
+        import io
+        calls = []
+        big = "\n\n".join(f"### 🧑 User\n\nmessage {i} " + "x" * 300
+                          for i in range(10))
+        with self._fake_provider(calls), \
+                unittest.mock.patch.object(ch, "LLM_INPUT_CAP", 1000), \
+                unittest.mock.patch.object(ch, "CHUNK_CAP", 800), \
+                contextlib.redirect_stderr(io.StringIO()):
+            out = ch.llm_summarize("claude-cli", None, big,
+                                   focus="care about X", use_cache=False)
+        self.assertGreaterEqual(len(calls), 3)      # ≥2 map + 1 reduce
+        self.assertEqual(out, f"NOTES{len(calls)}")
+        self.assertIn("NOTES1", calls[-1])          # reduce sees map notes
+        self.assertIn("care about X", calls[-1])    # focus reaches reduce
+        for prompt in calls[:-1]:
+            self.assertIn("part", prompt.lower())   # map prompts are labeled
+
+
+class ZeroTrustTests(unittest.TestCase):
+    """Secret redaction, chunk-note cache, and per-chunk retry."""
+
+    def test_redact_secrets_hits_known_shapes(self):
+        text = ("export ANTHROPIC_API_KEY=sk-ant-abc123def456ghi789 and "
+                "ghp_abcdefghij1234567890KLMNOP plus AKIAIOSFODNN7EXAMPLE "
+                "and password=hunter2secret ok")
+        redacted, n = ch.redact_secrets(text)
+        self.assertEqual(n, 4)
+        self.assertNotIn("sk-ant-abc123def456ghi789", redacted)
+        self.assertNotIn("ghp_abcdefghij", redacted)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", redacted)
+        self.assertNotIn("hunter2secret", redacted)
+        self.assertIn("password=[REDACTED]", redacted)
+
+    def test_redact_leaves_normal_content_alone(self):
+        text = ("git commit 1a2b3c4 fixed auth.py; see "
+                "https://github.com/Vasilispapg/claude-handoff and run "
+                "python -m pytest tests/ -q")
+        redacted, n = ch.redact_secrets(text)
+        self.assertEqual(n, 0)
+        self.assertEqual(redacted, text)
+
+    def test_chunk_cache_resumes_without_new_calls(self):
+        import contextlib
+        import io
+        import tempfile
+        calls = []
+
+        def fake_call(key, model, prompt):
+            calls.append(prompt)
+            return f"NOTES{len(calls)}"
+
+        big = "\n\n".join(f"### 🧑 User\n\nmessage {i} " + "x" * 300
+                          for i in range(10))
+        with tempfile.TemporaryDirectory() as td, \
+                unittest.mock.patch.dict(ch.PROVIDERS["claude-cli"],
+                                         {"call": fake_call}), \
+                unittest.mock.patch.object(ch, "CACHE_DIR", Path(td)), \
+                unittest.mock.patch.object(ch, "LLM_INPUT_CAP", 1000), \
+                unittest.mock.patch.object(ch, "CHUNK_CAP", 800), \
+                contextlib.redirect_stderr(io.StringIO()):
+            ch.llm_summarize("claude-cli", None, big)
+            first_run = len(calls)
+            ch.llm_summarize("claude-cli", None, big)
+            second_run = len(calls) - first_run
+        self.assertGreater(first_run, 2)
+        self.assertEqual(second_run, 1)   # only the reduce call repeats
+
+    def test_call_with_retry_recovers_once(self):
+        import contextlib
+        import io
+        attempts = []
+
+        def flaky(key, model, prompt):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise SystemExit("LLM API error 429: rate limited")
+            return "ok"
+
+        with unittest.mock.patch.object(ch.time, "sleep", lambda _: None), \
+                contextlib.redirect_stderr(io.StringIO()):
+            out = ch._call_with_retry(flaky, None, None, "p")
+        self.assertEqual(out, "ok")
+        self.assertEqual(len(attempts), 2)
+
+    def test_call_with_retry_final_error_mentions_resume(self):
+        def always_fails(key, model, prompt):
+            raise SystemExit("LLM API error 500: boom")
+
+        import contextlib
+        import io
+        with unittest.mock.patch.object(ch.time, "sleep", lambda _: None), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                ch._call_with_retry(always_fails, None, None, "p")
+        self.assertIn("resume", str(cm.exception))
+
+
 class HelperTests(unittest.TestCase):
     def test_truncate_short_passthrough(self):
         self.assertEqual(ch.truncate("abc", 10), "abc")

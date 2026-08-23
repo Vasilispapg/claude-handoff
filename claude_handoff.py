@@ -24,18 +24,20 @@ No key needed for --llm claude-cli — it uses your local Claude Code login.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -44,7 +46,30 @@ USER_MSG_CAP = 8000
 ASSISTANT_MSG_CAP = 5000
 TOOL_LINE_CAP = 200
 DEFAULT_MAX_CHARS = 80_000       # global cap on the transcript section
-LLM_INPUT_CAP = 400_000          # cap on transcript sent to an LLM
+LLM_INPUT_CAP = 400_000          # max transcript chars for a single LLM pass
+CHUNK_CAP = 200_000              # chunk size for map-reduce over huge sessions
+
+# Chunk-note cache: failed/interrupted map-reduce runs resume for free, and
+# re-runs (e.g. with a different --focus) reuse paid-for chunk notes.
+CACHE_DIR = Path(os.environ.get(
+    "CLAUDE_HANDOFF_CACHE", str(Path.home() / ".cache" / "claude-handoff")))
+CACHE_VERSION = "1"              # bump when CHUNK_PROMPT changes
+
+# Secret-shaped strings are stripped from transcripts before any --llm call
+# (zero-trust: session logs routinely contain keys pasted into commands).
+SECRET_RES = [
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),                    # OpenAI/Anthropic
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"),  # GitHub
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),             # Slack
+    re.compile(r"\bAKIA[A-Z0-9]{16}\b"),                       # AWS key id
+    re.compile(r"\bAIza[A-Za-z0-9_-]{30,}"),                   # Google
+    re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9._-]{20,}"),  # JWT
+    re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/-]{20,}=*"),
+    re.compile(r"((?:api[_-]?key|access[_-]?token|secret|password|passwd"
+               r"|authorization)\s*[=:]\s*[\"']?)[^\s\"'\[]{8,}",
+               re.IGNORECASE),
+]
 
 # LLM provider registry for --llm — see the "LLM summarization" section.
 # Adding a provider = one entry here + one _call_* function; nothing else
@@ -84,6 +109,41 @@ def find_sessions(project_filter: str | None = None,
             continue
         sessions.extend(p for p in proj.glob("*.jsonl") if p.stat().st_size > 0)
     return sorted(sessions, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def encode_project_path(path: Path) -> str:
+    """A filesystem path the way Claude Code encodes it into a project dir
+    name under ~/.claude/projects (every non-alphanumeric char becomes -)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def cwd_project_filter(cwd: Path | None = None,
+                       projects_dir: Path | None = None,
+                       home: Path | None = None) -> str | None:
+    """Project filter implied by the current directory, or None for global.
+
+    - cwd (or an ancestor) is a project root  → that project.
+    - cwd is a parent "master folder" of several project roots → all of
+      them (prefix match). Home and / never scope.
+    """
+    cwd = cwd or Path.cwd()
+    projects_dir = projects_dir or PROJECTS_DIR
+    home = home or Path.home()
+    if not projects_dir.is_dir():
+        return None
+    names = [d.name for d in projects_dir.iterdir() if d.is_dir()]
+
+    # master folder: only the cwd itself, and never home or /
+    encoded = encode_project_path(cwd)
+    if cwd not in (home, Path("/")):
+        if any(n == encoded or n.startswith(encoded + "-") for n in names):
+            return encoded
+    # exact project root among ancestors (covers being in a subfolder)
+    for candidate in cwd.parents:
+        encoded = encode_project_path(candidate)
+        if encoded in names:
+            return encoded
+    return None
 
 
 def session_label(path: Path) -> tuple[str | None, str]:
@@ -516,8 +576,15 @@ Rules: be specific; preserve exact file paths, commands, identifiers, URLs and \
 version numbers; quote short code snippets only when essential; do not invent \
 anything not present in the transcript; do not address the human; write it for \
 the next assistant. Answer in the language the user writes in.
+"""
 
-TRANSCRIPT:
+CHUNK_PROMPT = """\
+Below is part {i} of {n} of a long working session between a human and an AI \
+coding assistant. Write compact chronological notes (max 500 words) for a \
+later synthesis: goal and subgoals, key decisions and why, files and commands \
+touched, state at the end of this part, open threads. Preserve exact paths, \
+commands, identifiers and version numbers. Do not invent anything. Answer in \
+the language the user writes in.
 """
 
 
@@ -641,8 +708,89 @@ PROVIDERS.update({
 })
 
 
-def llm_summarize(provider: str, model: str | None, transcript: str) -> str:
-    """Resolve key + model for the provider and run its call strategy."""
+def redact_secrets(text: str) -> tuple[str, int]:
+    """Replace secret-shaped strings with [REDACTED]; returns (text, count).
+
+    Precision-first: known key prefixes and KEY=value assignments only —
+    git hashes, URLs and normal prose are left alone.
+    """
+    total = 0
+    for pattern in SECRET_RES:
+        def _sub(m: "re.Match[str]") -> str:
+            keep = m.group(1) if m.groups() else ""
+            return keep + "[REDACTED]"
+        text, n = pattern.subn(_sub, text)
+        total += n
+    return text, total
+
+
+def _chunk_cache_path(chunk: str, provider: str, model: str | None) -> Path:
+    digest = hashlib.sha256(
+        f"{CACHE_VERSION}|{provider}|{model}|{chunk}".encode()).hexdigest()
+    return CACHE_DIR / f"chunk-{digest[:32]}.json"
+
+
+def _cache_get(path: Path) -> str | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))["notes"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _cache_put(path: Path, notes: str) -> None:
+    try:  # best-effort — a failing cache must never fail the run
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"notes": notes}, ensure_ascii=False),
+                        encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _call_with_retry(call, key: str | None, model: str | None,
+                     prompt: str, attempts: int = 2) -> str:
+    """One retry on provider failure — transient 429/5xx shouldn't waste a
+    long map-reduce run. Chunk progress is cached, so even a final failure
+    resumes cheaply."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return call(key, model, prompt)
+        except SystemExit as e:
+            if attempt == attempts:
+                raise SystemExit(
+                    f"{e} — completed chunks are cached; rerun to resume."
+                ) from e
+            print(f"  provider error ({e}); retrying…", file=sys.stderr)
+            time.sleep(3)
+    raise AssertionError("unreachable")
+
+
+def _chunk_text(text: str, cap: int) -> list[str]:
+    """Split rendered transcript into ≤cap chunks on turn boundaries."""
+    parts = text.split("\n\n### ")
+    blocks = [parts[0]] + ["### " + p for p in parts[1:]]
+    chunks: list[str] = []
+    current = ""
+    for block in blocks:
+        if len(block) > cap:
+            block = truncate(block, cap)
+        if current and len(current) + len(block) + 2 > cap:
+            chunks.append(current)
+            current = block
+        else:
+            current = f"{current}\n\n{block}" if current else block
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def llm_summarize(provider: str, model: str | None, transcript: str,
+                  focus: str | None = None, use_cache: bool = True) -> str:
+    """Summarize a transcript with the provider's call strategy.
+
+    Transcripts beyond LLM_INPUT_CAP are map-reduced: per-chunk notes
+    first (cached, retried), then one synthesis pass — nothing is
+    silently dropped. `focus` carries extra user instructions.
+    """
     cfg = PROVIDERS.get(provider)
     if cfg is None:
         raise SystemExit(f"Unknown provider: {provider}. "
@@ -651,17 +799,63 @@ def llm_summarize(provider: str, model: str | None, transcript: str) -> str:
     if cfg["env_keys"] and not key:
         accepted = " or ".join(cfg["env_keys"])
         raise SystemExit(f"Set {accepted} to use --llm {provider}")
-    prompt = SUMMARY_PROMPT + truncate(transcript, LLM_INPUT_CAP)
-    return cfg["call"](key, model or cfg["default_model"], prompt)
+    model = model or cfg["default_model"]
+    extra = ("\nAdditional instructions from the user — follow them as "
+             f"well:\n{focus.strip()}\n" if focus else "")
+
+    if len(transcript) <= LLM_INPUT_CAP:
+        prompt = SUMMARY_PROMPT + extra + "\nTRANSCRIPT:\n" + transcript
+        return cfg["call"](key, model, prompt)
+
+    chunks = _chunk_text(transcript, CHUNK_CAP)
+    print(f"Transcript is {len(transcript):,} chars — map-reduce over "
+          f"{len(chunks)} chunks (up to {len(chunks) + 1} LLM calls).",
+          file=sys.stderr)
+    notes = []
+    for i, chunk in enumerate(chunks, 1):
+        # Focus is applied only in the reduce pass, so chunk notes stay
+        # reusable across runs with different --focus.
+        prompt = (CHUNK_PROMPT.format(i=i, n=len(chunks))
+                  + "\nPART:\n" + chunk)
+        cache_file = _chunk_cache_path(chunk, provider, model)
+        cached = _cache_get(cache_file) if use_cache else None
+        if cached is not None:
+            print(f"  part {i}/{len(chunks)} — cached.", file=sys.stderr)
+            notes.append(cached)
+            continue
+        print(f"  summarizing part {i}/{len(chunks)}…", file=sys.stderr)
+        result = _call_with_retry(cfg["call"], key, model, prompt)
+        if use_cache:
+            _cache_put(cache_file, result)
+        notes.append(result)
+    joined = "\n\n".join(f"[Part {i}/{len(chunks)} notes]\n{n.strip()}"
+                         for i, n in enumerate(notes, 1))
+    overhead = (
+        SUMMARY_PROMPT + extra
+        + "\nThe session was too long for one pass. Below are chronological "
+          "notes from each of its parts — synthesize them into ONE handoff "
+          "document:\n\nNOTES:\n")
+    # Truncate only the notes — instructions and focus must never be cut.
+    budget = max(LLM_INPUT_CAP - len(overhead), 1000)
+    return cfg["call"](key, model, overhead + truncate(joined, budget))
 
 
 def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
-              with_transcript: bool, max_chars: int) -> str:
+              with_transcript: bool, max_chars: int,
+              focus: str | None = None, redact: bool = True,
+              use_cache: bool = True) -> str:
     transcript = render_transcript(parsed, include_tools=True,
-                                   max_chars=LLM_INPUT_CAP)
+                                   max_chars=10**9)  # chunking handles size
     activity = render_activity(parsed)
-    summary = llm_summarize(provider, model,
-                            activity + "\n\n" + transcript)
+    outbound = activity + "\n\n" + transcript
+    if redact:
+        outbound, n_redacted = redact_secrets(outbound)
+        if n_redacted:
+            print(f"Redacted {n_redacted} secret-looking string(s) before "
+                  f"sending to the LLM (--no-redact to disable).",
+                  file=sys.stderr)
+    summary = llm_summarize(provider, model, outbound, focus=focus,
+                            use_cache=use_cache)
     sections = [render_header(parsed, source), summary.strip()]
     if with_transcript:
         sections.append(render_transcript(parsed, include_tools=False,
@@ -706,6 +900,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "contains QUERY (case-insensitive)")
     ap.add_argument("--project", metavar="NAME",
                     help="pick latest session whose project path contains NAME")
+    ap.add_argument("--any", action="store_true",
+                    help="ignore the current directory; consider sessions "
+                         "of every project (default when outside a project)")
     ap.add_argument("-o", "--output", default="handoff.md",
                     help="output file, or '-' for stdout (default: handoff.md)")
     ap.add_argument("--include-tools", action="store_true",
@@ -716,8 +913,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="summarize with an LLM instead of deterministic export; "
                          "claude-cli uses your local Claude Code login, no API key")
     ap.add_argument("--model", help="override the LLM model id for --llm")
+    ap.add_argument("--focus", metavar="TEXT",
+                    help="with --llm: extra instructions for the summary "
+                         "(e.g. --focus \"emphasize the API decisions\")")
     ap.add_argument("--with-transcript", action="store_true",
                     help="with --llm: also append the cleaned transcript")
+    ap.add_argument("--no-redact", action="store_true",
+                    help="with --llm: do not strip secret-looking strings "
+                         "from the transcript before sending it")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="with --llm: disable the chunk-note cache "
+                         f"({CACHE_DIR})")
     ap.add_argument("--version", action="version", version=__version__)
     return ap
 
@@ -776,7 +982,17 @@ def resolve_source(args: argparse.Namespace) -> Path:
         return _newest_named_session(args.session, args.project)
     if args.name:
         return _newest_named_session(args.name, args.project)
-    sessions = find_sessions(args.project)
+    scope = args.project
+    if not scope and not args.any:
+        scope = cwd_project_filter()
+        if scope:
+            print("Scoped to this directory's project(s) — pass --any "
+                  "for all projects.", file=sys.stderr)
+    sessions = find_sessions(scope)
+    if not sessions and scope and not args.project:
+        print("No sessions for this directory; falling back to all "
+              "projects.", file=sys.stderr)
+        sessions = find_sessions(None)
     if not sessions:
         raise SystemExit(
             f"No sessions found under {PROJECTS_DIR}"
@@ -792,7 +1008,9 @@ def build_document(parsed: dict, source: Path,
     """Deterministic or LLM-summarized document, per the CLI flags."""
     if args.llm:
         return build_llm(parsed, source, args.llm, args.model,
-                         args.with_transcript, args.max_chars)
+                         args.with_transcript, args.max_chars,
+                         focus=args.focus, redact=not args.no_redact,
+                         use_cache=not args.no_cache)
     return build_deterministic(parsed, source, args.include_tools,
                                args.max_chars)
 

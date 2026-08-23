@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg-info/
+handoff.md
+err.log
+
+# internal research notes — not part of the published repo
+docs/RESEARCH.md

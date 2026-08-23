@@ -145,8 +145,10 @@ text bumped the counter. Fixed with a per-record `added_text` flag.
 - Sidechains (subagent work) are dropped entirely — their outcomes usually
   surface in the main thread, but a `--include-sidechains` flag may be
   warranted.
-- Images are reduced to `[image attached]`; compaction summary records are
-  not specially handled; token/cost stats (`usage`) are ignored.
+- Images are reduced to `[image attached]`; token/cost stats (`usage`)
+  are ignored. (Compaction records ARE handled since v0.6.1:
+  `system/compact_boundary` is skipped, `isCompactSummary` user records
+  render as "📜 Compacted history" and don't count as human turns.)
 - Only two session flavors tested (classic CLI, SDK/Cowork). Hours-long
   sessions with MCP tools and multiple compactions will find edge cases.
 - claude.ai web exports (`conversations.json`) not yet accepted as input —

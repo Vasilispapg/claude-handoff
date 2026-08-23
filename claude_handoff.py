@@ -38,7 +38,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -507,6 +507,13 @@ def _handle_user_record(rec: dict, state: dict) -> None:
     text = clean_text(user_text(message))
     if not text:
         return
+    # /compact leaves its machine-written history summary as a "user"
+    # record — keep the content, but label it and don't count it as human.
+    if rec.get("isCompactSummary") or text.startswith(
+            "This session is being continued from a previous conversation"):
+        state["turns"].append({"role": "compact", "text_parts": [text],
+                               "tools": [], "ts": rec.get("timestamp")})
+        return
     state["meta"]["n_user"] += 1
     state["turns"].append({"role": "user", "text_parts": [text],
                            "tools": [], "ts": rec.get("timestamp")})
@@ -684,7 +691,11 @@ def render_transcript(parsed: dict, include_tools: bool,
     blocks = []
     for turn in parsed["turns"]:
         text = "\n\n".join(turn["text_parts"]).strip()
-        if turn["role"] == "user":
+        if turn["role"] == "compact":
+            blocks.append("### 📜 Compacted history (auto-summary of the "
+                          "earlier part of this session)\n\n"
+                          + truncate(text, USER_MSG_CAP))
+        elif turn["role"] == "user":
             blocks.append("### 🧑 User\n\n" + truncate(text, USER_MSG_CAP))
         else:
             parts = []

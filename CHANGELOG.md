@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1 — 2026-08-23
+
+- **/compact handled properly**: the machine-written history summary that
+  `/compact` leaves behind (an `isCompactSummary` "user" record) is now
+  rendered as "📜 Compacted history" instead of masquerading as a giant
+  🧑 User message, and no longer counts toward user-turn totals or
+  `--last N`. Verified against a real 264MB compacted session.
+
 ## 0.6.0 — 2026-08-23
 
 - **claude.ai web chats as input**: point it at the `conversations.json`

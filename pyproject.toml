@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-handoff"
-version = "0.6.0"
+version = "0.6.1"
 description = "Summarize & export a Claude Code session into one clean handoff.md for Gemini, GPT, or another Claude."
 readme = "README.md"
 license = { text = "MIT" }

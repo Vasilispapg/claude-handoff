@@ -344,6 +344,35 @@ class SummarizeTests(unittest.TestCase):
 
 
 WEB_EXPORT = ROOT / "tests" / "fixtures" / "claude_web_export.json"
+COMPACTED = ROOT / "tests" / "fixtures" / "compacted_session.jsonl"
+
+
+class CompactionTests(unittest.TestCase):
+    """Sessions that went through /compact."""
+
+    def test_compact_summary_labeled_not_counted_as_user(self):
+        parsed = ch.parse_session(COMPACTED)
+        roles = [t["role"] for t in parsed["turns"]]
+        self.assertEqual(roles, ["compact", "user", "assistant"])
+        self.assertEqual(parsed["meta"]["n_user"], 1)   # only the human turn
+
+    def test_compact_summary_rendering(self):
+        parsed = ch.parse_session(COMPACTED)
+        doc = ch.build_deterministic(parsed, COMPACTED,
+                                     include_tools=False, max_chars=80_000)
+        self.assertIn("Compacted history", doc)
+        self.assertIn("Primary Request and Intent", doc)
+        self.assertEqual(doc.count("🧑 User"), 1)
+
+    def test_prefix_fallback_without_flag(self):
+        rec = {"type": "user", "message": {
+            "role": "user",
+            "content": "This session is being continued from a previous "
+                       "conversation that ran out of context. Summary: x"}}
+        state = ch._new_parse_state()
+        ch._handle_user_record(rec, state)
+        self.assertEqual(state["turns"][0]["role"], "compact")
+        self.assertEqual(state["meta"]["n_user"], 0)
 
 
 class WebExportTests(unittest.TestCase):

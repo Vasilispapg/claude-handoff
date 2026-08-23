@@ -1,0 +1,2 @@
+{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/home/vspapg/myapp","sessionId":"triv01","version":"2.1.185","gitBranch":"main","type":"user","message":{"role":"user","content":"claude-handoff --llm claude-cli"},"uuid":"tu1","timestamp":"2026-08-23T21:40:00.000Z"}
+{"parentUuid":"tu1","isSidechain":false,"type":"assistant","message":{"model":"claude-sonnet-4-5","role":"assistant","content":[{"type":"text","text":"I'm ready to help. What would you like to work on?"}]},"uuid":"ta1","timestamp":"2026-08-23T21:40:05.000Z","sessionId":"triv01"}

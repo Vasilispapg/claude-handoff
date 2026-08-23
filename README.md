@@ -39,6 +39,8 @@ claude-handoff --llm gemini --with-transcript   # summary + cleaned transcript
 
 Then paste `handoff.md` into any other model. The document opens with instructions to the receiving assistant, so no extra prompting is needed.
 
+> Auto-selection skips nearly-empty sessions (like the stub `claude /login` leaves behind) so "latest" means your latest *real* conversation. An explicit path or `--name` always wins.
+
 ## What the output looks like
 
 ```markdown

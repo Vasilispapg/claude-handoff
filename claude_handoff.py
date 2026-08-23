@@ -35,7 +35,7 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -737,6 +737,32 @@ def _newest_named_session(query: str, project_filter: str | None) -> Path:
     return matches[0]
 
 
+def looks_trivial(parsed: dict) -> bool:
+    """True for sessions with (almost) no conversation — e.g. the stub
+    session `claude /login` leaves behind, or a chat someone typed a single
+    shell command into. Auto-selection skips these; explicit choices don't.
+    """
+    meta = parsed["meta"]
+    if meta["n_user"] + meta["n_assistant"] > 2:
+        return False
+    chars = sum(len(part) for turn in parsed["turns"]
+                for part in turn["text_parts"])
+    return chars < 600
+
+
+def _newest_meaningful_session(sessions: list[Path],
+                               max_probe: int = 15) -> Path:
+    """First session (newest-first) that isn't nearly empty."""
+    for path in sessions[:max_probe]:
+        if not looks_trivial(parse_session(path)):
+            return path
+        title, prompt = session_label(path)
+        print(f"Skipping nearly-empty session {path.stem[:8]} "
+              f"({title or prompt}) — pass a path or --name to force it.",
+              file=sys.stderr)
+    return sessions[0]
+
+
 def resolve_source(args: argparse.Namespace) -> Path:
     """The session file to export: explicit path, name match, or newest."""
     if args.session:
@@ -756,8 +782,9 @@ def resolve_source(args: argparse.Namespace) -> Path:
             f"No sessions found under {PROJECTS_DIR}"
             + (f" matching '{args.project}'" if args.project else "")
             + ". Pass a .jsonl path explicitly, or run --list.")
-    print(f"Using latest session: {sessions[0]}", file=sys.stderr)
-    return sessions[0]
+    source = _newest_meaningful_session(sessions)
+    print(f"Using latest session: {source}", file=sys.stderr)
+    return source
 
 
 def build_document(parsed: dict, source: Path,

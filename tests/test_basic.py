@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 import claude_handoff as ch  # noqa: E402
 
 FIXTURE = ROOT / "tests" / "fixtures" / "classic_session.jsonl"
+TRIVIAL = ROOT / "tests" / "fixtures" / "trivial_session.jsonl"
 
 
 class ParseTests(unittest.TestCase):
@@ -118,6 +119,37 @@ class DiscoveryTests(unittest.TestCase):
         with contextlib.redirect_stderr(buf), self.assertRaises(SystemExit):
             ch.build_arg_parser().parse_args(["--bogus"])
         self.assertIn("--help", buf.getvalue())
+
+    def test_looks_trivial(self):
+        self.assertTrue(ch.looks_trivial(ch.parse_session(TRIVIAL)))
+        self.assertFalse(ch.looks_trivial(ch.parse_session(FIXTURE)))
+
+    def test_auto_selection_skips_trivial_sessions(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with unittest.mock.patch.object(ch, "find_sessions",
+                                        lambda *a, **k: [TRIVIAL, FIXTURE]), \
+                contextlib.redirect_stderr(buf):
+            args = ch.build_arg_parser().parse_args([])
+            self.assertEqual(ch.resolve_source(args), FIXTURE)
+        self.assertIn("nearly-empty", buf.getvalue())
+
+    def test_explicit_choice_never_skipped(self):
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()):
+            args = ch.build_arg_parser().parse_args([str(TRIVIAL)])
+            self.assertEqual(ch.resolve_source(args), TRIVIAL)
+
+    def test_all_trivial_falls_back_to_newest(self):
+        import contextlib
+        import io
+        with unittest.mock.patch.object(ch, "find_sessions",
+                                        lambda *a, **k: [TRIVIAL]), \
+                contextlib.redirect_stderr(io.StringIO()):
+            args = ch.build_arg_parser().parse_args([])
+            self.assertEqual(ch.resolve_source(args), TRIVIAL)
 
 
 class ProviderTests(unittest.TestCase):

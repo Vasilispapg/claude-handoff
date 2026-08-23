@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 — 2026-08-23
+
+- **Auto-selection skips nearly-empty sessions.** Running `claude /login`
+  (or typing a stray line into a chat) leaves a stub session behind that
+  used to become the "latest session" — so a summary run right after
+  logging in summarized nothing. Auto-pick now skips sessions with ≤2
+  turns and under 600 chars, with a stderr note. An explicit path,
+  `--name`, or fixture choice is never skipped.
+
 ## 0.3.0 — 2026-08-23
 
 - **Pick sessions by name**: `--name QUERY` (or just

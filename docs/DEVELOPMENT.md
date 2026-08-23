@@ -63,7 +63,10 @@ Noise conventions discovered:
 | Drop, don't keep: tool results, thinking, sidechains, meta | Tool results are bulky and re-derivable; thinking is private reasoning; sidechains are another agent's transcript. The *activity summary* (files touched, commands run) preserves the useful residue. |
 | Merge consecutive assistant records into one turn | One user prompt can produce dozens of assistant API-call records interleaved with tool results. A reader wants turns, not records. |
 | Head+tail truncation, never head-only | Per message (70/20) and globally (35/60): the opening sets the goal, the recent end is the current state — the middle is the most expendable. |
-| LLM calls via raw `urllib` | No SDKs → no dependencies. Three providers (Anthropic, OpenAI, Gemini), keys from env, model overridable with `--model` since default model ids rot quickly. |
+| LLM calls via raw `urllib` | No SDKs → no dependencies. Keys from env, model overridable with `--model` since default model ids rot quickly. |
+| Provider registry (`PROVIDERS`), v0.2.0 | Each provider = accepted env keys (first hit wins, graphify-style — incl. `CLAUDE_API`/`GPT_API`/`GEMINI_API` aliases) + default model + a call strategy function. Adding a provider touches nothing else (open/closed). |
+| `--llm claude-cli`, v0.2.0 | Shells out to the locally-installed Claude Code CLI (`claude -p --output-format json --no-session-persistence`), so Pro/Max subscribers get real summaries with **no API key**. `CLAUDE*` env vars are scrubbed from the subprocess (except `CLAUDE_CODE_OAUTH_TOKEN`) so nested runs from inside a Claude Code session authenticate like a fresh CLI. Same pattern graphify uses for its `claude-cli` backend. |
+| SOLID without classes, v0.2.0 | Public-repo maintainability pass: `parse_session` and `main` split into single-responsibility helpers; behavior verified byte-identical against v0.1.0 output on a real 4 MB session and the fixture. |
 | Handoff preamble addressed to the *receiving* assistant | The output must work as a first message with zero extra prompting. |
 
 ## 4. Pipeline architecture
@@ -87,8 +90,11 @@ Noise conventions discovered:
    (capped at 400k chars) to `llm_summarize()` with a fixed prompt that
    demands six sections (Goal / Key decisions / Current state / Files &
    artifacts / Next steps / Constraints & preferences), forbids invention,
-   and answers in the user's language. `--with-transcript` appends the
-   cleaned transcript after the summary.
+   and answers in the user's language. `llm_summarize()` resolves the key
+   via `provider_key()` and dispatches to the provider's call strategy from
+   the `PROVIDERS` registry (`_call_claude`, `_call_openai`, `_call_gemini`
+   over `urllib`; `_call_claude_cli` over `subprocess`).
+   `--with-transcript` appends the cleaned transcript after the summary.
 
 ## 5. Bugs found while dogfooding
 
@@ -118,9 +124,15 @@ text bumped the counter. Fixed with a per-record `added_text` flag.
   caveat message, slash-command envelope, string-content tool results,
   a sidechain record, Greek text. Verifies filtering, turn merging,
   file/command extraction, `<details>` rendering.
-- **LLM path**: exercised with a stubbed `http_json` (no real API calls were
-  made — the sandbox has no keys). Live provider calls are **untested**;
-  treat the three request payloads as "correct per docs, unverified".
+- **LLM path** (v0.2.0): `claude-cli` exercised end-to-end through a shim
+  `claude` binary emitting the real envelope format, plus mocked-subprocess
+  unit tests (envelope parsing, missing binary, nonzero exit, is_error
+  surfacing). Key-alias resolution verified **live** against the Anthropic
+  API (fake `CLAUDE_API` key → correct 401 `authentication_error`, proving
+  the full alias → registry → `http_json` wiring). Full live summaries via
+  paid API keys remain unverified; treat the three HTTP payloads as
+  "correct per docs". A live `--llm claude-cli` run requires a
+  logged-in CLI (`claude` → `/login` once).
 - **Error paths**: missing API key, nonexistent file, empty session — all
   exit with a one-line message, no tracebacks.
 - **Packaging**: `pip install -e .` + `claude-handoff --version` +

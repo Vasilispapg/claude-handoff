@@ -15,8 +15,10 @@ Usage:
     claude-handoff path/to/session.jsonl -o -          # explicit file -> stdout
     claude-handoff --llm claude         # real LLM summary (needs API key in env)
 
-API keys (only needed with --llm):
-    ANTHROPIC_API_KEY | OPENAI_API_KEY | GEMINI_API_KEY (or GOOGLE_API_KEY)
+API keys (only needed with --llm claude|openai|gemini):
+    ANTHROPIC_API_KEY (or CLAUDE_API) | OPENAI_API_KEY (or GPT_API)
+    GEMINI_API_KEY (or GOOGLE_API_KEY / GEMINI_API)
+No key needed for --llm claude-cli — it uses your local Claude Code login.
 """
 
 from __future__ import annotations
@@ -25,13 +27,15 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -42,11 +46,10 @@ TOOL_LINE_CAP = 200
 DEFAULT_MAX_CHARS = 80_000       # global cap on the transcript section
 LLM_INPUT_CAP = 400_000          # cap on transcript sent to an LLM
 
-DEFAULT_MODELS = {
-    "claude": "claude-sonnet-4-5",
-    "openai": "gpt-4o-mini",
-    "gemini": "gemini-2.5-flash",
-}
+# LLM provider registry for --llm — see the "LLM summarization" section.
+# Adding a provider = one entry here + one _call_* function; nothing else
+# changes (open/closed). Populated after the call functions are defined.
+PROVIDERS: dict = {}
 
 FILE_TOOLS_WRITE = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 FILE_TOOLS_READ = {"Read"}
@@ -67,12 +70,14 @@ CAVEAT_RE = re.compile(r"^Caveat: The messages below were generated.*?$", re.MUL
 #  Session discovery
 # --------------------------------------------------------------------------- #
 
-def find_sessions(project_filter: str | None = None) -> list[Path]:
+def find_sessions(project_filter: str | None = None,
+                  projects_dir: Path | None = None) -> list[Path]:
     """All session JSONL files, newest first."""
-    if not PROJECTS_DIR.is_dir():
+    projects_dir = projects_dir or PROJECTS_DIR
+    if not projects_dir.is_dir():
         return []
     sessions = []
-    for proj in sorted(PROJECTS_DIR.iterdir()):
+    for proj in sorted(projects_dir.iterdir()):
         if not proj.is_dir():
             continue
         if project_filter and project_filter.lower() not in proj.name.lower():
@@ -211,130 +216,147 @@ def tool_summary(name: str, tool_input: dict) -> tuple[str, str | None, str | No
     return line, file_written, command
 
 
+def _new_parse_state() -> dict:
+    """Mutable accumulator shared by the per-record handlers below."""
+    return {
+        "meta": {
+            "session_id": None, "cwd": None, "git_branch": None,
+            "version": None, "models": set(), "first_ts": None,
+            "last_ts": None, "n_user": 0, "n_assistant": 0, "n_tools": 0,
+            "summaries": [],
+        },
+        "turns": [],            # {"role", "text_parts", "tools"}
+        "files_written": {},    # path -> edit count
+        "files_read": {},       # path -> read count
+        "commands": [],
+        "_tool_names": {},      # tool_use_id -> tool name (internal)
+    }
+
+
+def _update_envelope_meta(rec: dict, meta: dict) -> None:
+    """Fold a record's envelope fields (session id, cwd, timestamps) into meta."""
+    for key, field in (("session_id", "sessionId"), ("cwd", "cwd"),
+                       ("git_branch", "gitBranch"), ("version", "version")):
+        if rec.get(field) and not meta[key]:
+            meta[key] = rec[field]
+    ts = rec.get("timestamp")
+    if ts:
+        meta["first_ts"] = meta["first_ts"] or ts
+        meta["last_ts"] = ts
+
+
+def _current_assistant_turn(state: dict) -> dict:
+    """Last turn if it's an assistant turn, else a fresh one (turn merging)."""
+    turns = state["turns"]
+    if turns and turns[-1]["role"] == "assistant":
+        return turns[-1]
+    turn = {"role": "assistant", "text_parts": [], "tools": []}
+    turns.append(turn)
+    return turn
+
+
+def _handle_tool_use(block: dict, turn: dict, state: dict) -> bool:
+    """Record one tool_use block. Returns True if it produced assistant text."""
+    name = block.get("name", "?")
+    state["_tool_names"][block.get("id", "")] = name
+    # In SDK/Cowork sessions the assistant's prose is sent via this tool —
+    # recover it as normal assistant text.
+    if name == "SendUserMessage":
+        msg = (block.get("input") or {}).get("message", "")
+        if msg.strip():
+            turn["text_parts"].append(msg.strip())
+            return True
+        return False
+    state["meta"]["n_tools"] += 1
+    line, file_written, command = tool_summary(name, block.get("input"))
+    turn["tools"].append(line)
+    if file_written:
+        fw = state["files_written"]
+        fw[file_written] = fw.get(file_written, 0) + 1
+    if name in FILE_TOOLS_READ:
+        file_read = (block.get("input") or {}).get("file_path")
+        if file_read:
+            fr = state["files_read"]
+            fr[file_read] = fr.get(file_read, 0) + 1
+    if command:
+        state["commands"].append(command)
+    return False
+
+
+def _handle_assistant_record(rec: dict, state: dict) -> None:
+    """Merge an assistant API record into the current assistant turn."""
+    message = rec.get("message") or {}
+    if message.get("model"):
+        state["meta"]["models"].add(message["model"])
+    content = message.get("content")
+    if not isinstance(content, list):
+        return
+    turn = _current_assistant_turn(state)
+    added_text = False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text" and block.get("text", "").strip():
+            turn["text_parts"].append(block["text"].strip())
+            added_text = True
+        elif btype == "tool_use":
+            added_text = _handle_tool_use(block, turn, state) or added_text
+        # thinking blocks are deliberately dropped
+    if added_text:
+        state["meta"]["n_assistant"] += 1
+
+
+def _handle_user_record(rec: dict, state: dict) -> None:
+    """Append a user turn, filtering meta records and tool-result echoes."""
+    if rec.get("isMeta"):
+        return
+    message = rec.get("message") or {}
+    content = message.get("content")
+    if isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result"
+        for b in content
+    ):
+        # Tool results echoed back are noise — except answers the human
+        # gave to AskUserQuestion, which are real user input.
+        for b in content:
+            if (isinstance(b, dict) and b.get("type") == "tool_result"
+                    and state["_tool_names"].get(b.get("tool_use_id", ""))
+                    == "AskUserQuestion"):
+                answer = tool_result_text(b)
+                if answer:
+                    state["meta"]["n_user"] += 1
+                    state["turns"].append({"role": "user",
+                                           "text_parts": [answer],
+                                           "tools": []})
+        return
+    text = clean_text(user_text(message))
+    if not text:
+        return
+    state["meta"]["n_user"] += 1
+    state["turns"].append({"role": "user", "text_parts": [text], "tools": []})
+
+
 def parse_session(path: Path) -> dict:
     """Parse a session JSONL into turns + metadata + activity stats."""
-    records = load_records(path)
-
-    meta = {
-        "session_id": None, "cwd": None, "git_branch": None,
-        "version": None, "models": set(), "first_ts": None, "last_ts": None,
-        "n_user": 0, "n_assistant": 0, "n_tools": 0, "summaries": [],
-    }
-    turns: list[dict] = []          # {"role", "text_parts", "tools"}
-    files_written: dict[str, int] = {}
-    files_read: dict[str, int] = {}
-    commands: list[str] = []
-    tool_names: dict[str, str] = {}  # tool_use_id -> tool name
-
-    def current_assistant_turn() -> dict:
-        if turns and turns[-1]["role"] == "assistant":
-            return turns[-1]
-        turn = {"role": "assistant", "text_parts": [], "tools": []}
-        turns.append(turn)
-        return turn
-
-    for rec in records:
+    state = _new_parse_state()
+    for rec in load_records(path):
         rtype = rec.get("type")
-
         if rtype == "summary" and rec.get("summary"):
-            meta["summaries"].append(rec["summary"])
-            continue
-        if rtype not in ("user", "assistant"):
-            continue
-        if rec.get("isSidechain"):
-            continue  # subagent branches — noise for a handoff
+            state["meta"]["summaries"].append(rec["summary"])
+        elif rtype in ("user", "assistant") and not rec.get("isSidechain"):
+            _update_envelope_meta(rec, state["meta"])
+            if rtype == "assistant":
+                _handle_assistant_record(rec, state)
+            else:
+                _handle_user_record(rec, state)
+        # unknown record types (queue-operation, attachment, …) are skipped
 
-        for key, field in (("session_id", "sessionId"), ("cwd", "cwd"),
-                           ("git_branch", "gitBranch"), ("version", "version")):
-            if rec.get(field) and not meta[key]:
-                meta[key] = rec[field]
-        ts = rec.get("timestamp")
-        if ts:
-            meta["first_ts"] = meta["first_ts"] or ts
-            meta["last_ts"] = ts
-
-        message = rec.get("message") or {}
-
-        if rtype == "assistant":
-            if message.get("model"):
-                meta["models"].add(message["model"])
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            turn = current_assistant_turn()
-            added_text = False
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type")
-                if btype == "text" and block.get("text", "").strip():
-                    turn["text_parts"].append(block["text"].strip())
-                    added_text = True
-                elif btype == "tool_use":
-                    name = block.get("name", "?")
-                    tool_names[block.get("id", "")] = name
-                    # In SDK/Cowork sessions the assistant's prose is sent via
-                    # this tool — recover it as normal assistant text.
-                    if name == "SendUserMessage":
-                        msg = (block.get("input") or {}).get("message", "")
-                        if msg.strip():
-                            turn["text_parts"].append(msg.strip())
-                            added_text = True
-                        continue
-                    meta["n_tools"] += 1
-                    line, fw, cmd = tool_summary(name, block.get("input"))
-                    turn["tools"].append(line)
-                    if fw:
-                        files_written[fw] = files_written.get(fw, 0) + 1
-                    if name in FILE_TOOLS_READ:
-                        fr = (block.get("input") or {}).get("file_path")
-                        if fr:
-                            files_read[fr] = files_read.get(fr, 0) + 1
-                    if cmd:
-                        commands.append(cmd)
-                # thinking blocks are deliberately dropped
-            if added_text:
-                meta["n_assistant"] += 1
-
-        else:  # user
-            if rec.get("isMeta"):
-                continue
-            content = message.get("content")
-            if isinstance(content, list) and any(
-                isinstance(b, dict) and b.get("type") == "tool_result"
-                for b in content
-            ):
-                # Tool results echoed back are noise — except answers the
-                # human gave to AskUserQuestion, which are real user input.
-                for b in content:
-                    if (isinstance(b, dict) and b.get("type") == "tool_result"
-                            and tool_names.get(b.get("tool_use_id", ""))
-                            == "AskUserQuestion"):
-                        answer = tool_result_text(b)
-                        if answer:
-                            meta["n_user"] += 1
-                            turns.append({"role": "user",
-                                          "text_parts": [answer],
-                                          "tools": []})
-                continue
-            text = clean_text(user_text(message))
-            if not text:
-                continue
-            meta["n_user"] += 1
-            turns.append({"role": "user", "text_parts": [text], "tools": []})
-
-    # collapse empty assistant turns (tool-only, no text) into markers
-    cleaned_turns = [
-        t for t in turns if t["text_parts"] or t["tools"]
-    ]
-
-    return {
-        "meta": meta,
-        "turns": cleaned_turns,
-        "files_written": files_written,
-        "files_read": files_read,
-        "commands": commands,
-    }
+    # drop empty turns (e.g. assistant records that carried only thinking)
+    state["turns"] = [t for t in state["turns"]
+                      if t["text_parts"] or t["tools"]]
+    state.pop("_tool_names")
+    return state
 
 
 # --------------------------------------------------------------------------- #
@@ -474,6 +496,15 @@ TRANSCRIPT:
 """
 
 
+def provider_key(provider: str) -> str | None:
+    """First non-empty API key among the provider's accepted env vars."""
+    for name in PROVIDERS[provider]["env_keys"]:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
 def http_json(url: str, payload: dict, headers: dict) -> dict:
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(),
@@ -489,47 +520,114 @@ def http_json(url: str, payload: dict, headers: dict) -> dict:
         raise SystemExit(f"LLM API unreachable: {e.reason}") from e
 
 
+def _call_claude(key: str, model: str, prompt: str) -> str:
+    """Anthropic Messages API."""
+    data = http_json(
+        "https://api.anthropic.com/v1/messages",
+        {"model": model, "max_tokens": 4096,
+         "messages": [{"role": "user", "content": prompt}]},
+        {"x-api-key": key, "anthropic-version": "2023-06-01"},
+    )
+    return "".join(b.get("text", "") for b in data.get("content", []))
+
+
+def _call_openai(key: str, model: str, prompt: str) -> str:
+    """OpenAI Chat Completions API."""
+    data = http_json(
+        "https://api.openai.com/v1/chat/completions",
+        {"model": model,
+         "messages": [{"role": "user", "content": prompt}]},
+        {"Authorization": f"Bearer {key}"},
+    )
+    return data["choices"][0]["message"]["content"]
+
+
+def _call_gemini(key: str, model: str, prompt: str) -> str:
+    """Google Gemini generateContent API."""
+    data = http_json(
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent",
+        {"contents": [{"parts": [{"text": prompt}]}]},
+        {"x-goog-api-key": key},
+    )
+    return data["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def _call_claude_cli(key: str | None, model: str | None, prompt: str) -> str:
+    """Locally-installed Claude Code CLI (`claude -p`) — the user's existing
+    Claude subscription pays for the call; no API key involved."""
+    del key  # the CLI carries its own authentication
+    if shutil.which("claude") is None:
+        raise SystemExit(
+            "`claude` CLI not found on PATH. Install Claude Code "
+            "(https://claude.ai/code) and authenticate once, or use "
+            "--llm claude with an API key instead.")
+    cmd = ["claude", "-p", "--output-format", "json",
+           "--no-session-persistence"]
+    if model:
+        cmd += ["--model", model]
+    # Scrub host-session variables so a nested run (claude-handoff invoked
+    # from inside a Claude Code session) authenticates like a fresh CLI.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("CLAUDE") or k == "CLAUDE_CODE_OAUTH_TOKEN"}
+    try:
+        proc = subprocess.run(
+            cmd, input=prompt, capture_output=True, text=True,
+            encoding="utf-8", timeout=600, check=False, env=env)
+    except subprocess.TimeoutExpired:
+        raise SystemExit("claude CLI timed out after 600s") from None
+    try:
+        envelope = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        envelope = {}
+    result = (envelope.get("result") or "").strip()
+    if proc.returncode != 0 or envelope.get("is_error"):
+        detail = result or proc.stderr.strip()[:500] or proc.stdout[:300]
+        raise SystemExit(f"claude CLI failed (exit {proc.returncode}): {detail}")
+    if not result:
+        raise SystemExit("claude CLI returned an empty summary")
+    return result
+
+
+# Each provider: accepted key env vars (first hit wins, graphify-style;
+# empty tuple = no key needed), a default model (None = provider decides),
+# and the call strategy. Adding a provider touches nothing but this table.
+PROVIDERS.update({
+    "claude": {
+        "env_keys": ("ANTHROPIC_API_KEY", "CLAUDE_API"),
+        "default_model": "claude-sonnet-4-5",
+        "call": _call_claude,
+    },
+    "openai": {
+        "env_keys": ("OPENAI_API_KEY", "GPT_API"),
+        "default_model": "gpt-4o-mini",
+        "call": _call_openai,
+    },
+    "gemini": {
+        "env_keys": ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API"),
+        "default_model": "gemini-2.5-flash",
+        "call": _call_gemini,
+    },
+    "claude-cli": {
+        "env_keys": (),
+        "default_model": None,
+        "call": _call_claude_cli,
+    },
+})
+
+
 def llm_summarize(provider: str, model: str | None, transcript: str) -> str:
-    model = model or DEFAULT_MODELS[provider]
+    """Resolve key + model for the provider and run its call strategy."""
+    cfg = PROVIDERS.get(provider)
+    if cfg is None:
+        raise SystemExit(f"Unknown provider: {provider}. "
+                         f"Available: {', '.join(sorted(PROVIDERS))}")
+    key = provider_key(provider)
+    if cfg["env_keys"] and not key:
+        accepted = " or ".join(cfg["env_keys"])
+        raise SystemExit(f"Set {accepted} to use --llm {provider}")
     prompt = SUMMARY_PROMPT + truncate(transcript, LLM_INPUT_CAP)
-
-    if provider == "claude":
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            raise SystemExit("Set ANTHROPIC_API_KEY to use --llm claude")
-        data = http_json(
-            "https://api.anthropic.com/v1/messages",
-            {"model": model, "max_tokens": 4096,
-             "messages": [{"role": "user", "content": prompt}]},
-            {"x-api-key": key, "anthropic-version": "2023-06-01"},
-        )
-        return "".join(b.get("text", "") for b in data.get("content", []))
-
-    if provider == "openai":
-        key = os.environ.get("OPENAI_API_KEY")
-        if not key:
-            raise SystemExit("Set OPENAI_API_KEY to use --llm openai")
-        data = http_json(
-            "https://api.openai.com/v1/chat/completions",
-            {"model": model,
-             "messages": [{"role": "user", "content": prompt}]},
-            {"Authorization": f"Bearer {key}"},
-        )
-        return data["choices"][0]["message"]["content"]
-
-    if provider == "gemini":
-        key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if not key:
-            raise SystemExit("Set GEMINI_API_KEY to use --llm gemini")
-        data = http_json(
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{model}:generateContent",
-            {"contents": [{"parts": [{"text": prompt}]}]},
-            {"x-goog-api-key": key},
-        )
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-
-    raise SystemExit(f"Unknown provider: {provider}")
+    return cfg["call"](key, model or cfg["default_model"], prompt)
 
 
 def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
@@ -551,7 +649,7 @@ def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
 #  CLI
 # --------------------------------------------------------------------------- #
 
-def main(argv: list[str] | None = None) -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="claude-handoff",
         description="Summarize & export a Claude Code session for another LLM.",
@@ -568,51 +666,64 @@ def main(argv: list[str] | None = None) -> None:
                     help="include collapsed per-tool-call detail in transcript")
     ap.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS,
                     help=f"cap transcript section size (default {DEFAULT_MAX_CHARS})")
-    ap.add_argument("--llm", choices=["claude", "openai", "gemini"],
-                    help="summarize with an LLM instead of deterministic export")
+    ap.add_argument("--llm", choices=sorted(PROVIDERS),
+                    help="summarize with an LLM instead of deterministic export; "
+                         "claude-cli uses your local Claude Code login, no API key")
     ap.add_argument("--model", help="override the LLM model id for --llm")
     ap.add_argument("--with-transcript", action="store_true",
                     help="with --llm: also append the cleaned transcript")
     ap.add_argument("--version", action="version", version=__version__)
-    args = ap.parse_args(argv)
+    return ap
 
-    if args.list:
-        list_sessions(args.project)
-        return
 
+def resolve_source(args: argparse.Namespace) -> Path:
+    """The session file to export: explicit path, or newest discovered."""
     if args.session:
         source = Path(args.session).expanduser()
         if not source.is_file():
             raise SystemExit(f"Not a file: {source}")
-    else:
-        sessions = find_sessions(args.project)
-        if not sessions:
-            raise SystemExit(
-                f"No sessions found under {PROJECTS_DIR}"
-                + (f" matching '{args.project}'" if args.project else "")
-                + ". Pass a .jsonl path explicitly, or run --list.")
-        source = sessions[0]
-        print(f"Using latest session: {source}", file=sys.stderr)
+        return source
+    sessions = find_sessions(args.project)
+    if not sessions:
+        raise SystemExit(
+            f"No sessions found under {PROJECTS_DIR}"
+            + (f" matching '{args.project}'" if args.project else "")
+            + ". Pass a .jsonl path explicitly, or run --list.")
+    print(f"Using latest session: {sessions[0]}", file=sys.stderr)
+    return sessions[0]
 
+
+def build_document(parsed: dict, source: Path,
+                   args: argparse.Namespace) -> str:
+    """Deterministic or LLM-summarized document, per the CLI flags."""
+    if args.llm:
+        return build_llm(parsed, source, args.llm, args.model,
+                         args.with_transcript, args.max_chars)
+    return build_deterministic(parsed, source, args.include_tools,
+                               args.max_chars)
+
+
+def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
+    if args.output == "-":
+        sys.stdout.write(doc)
+        return
+    out = Path(args.output)
+    out.write_text(doc, encoding="utf-8")
+    n_user = parsed["meta"]["n_user"]
+    print(f"Wrote {out} ({len(doc):,} chars, {n_user} user messages"
+          f"{', LLM-summarized' if args.llm else ''})", file=sys.stderr)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_arg_parser().parse_args(argv)
+    if args.list:
+        list_sessions(args.project)
+        return
+    source = resolve_source(args)
     parsed = parse_session(source)
     if not parsed["turns"]:
         raise SystemExit("Session parsed but contains no conversation turns.")
-
-    if args.llm:
-        doc = build_llm(parsed, source, args.llm, args.model,
-                        args.with_transcript, args.max_chars)
-    else:
-        doc = build_deterministic(parsed, source, args.include_tools,
-                                  args.max_chars)
-
-    if args.output == "-":
-        sys.stdout.write(doc)
-    else:
-        out = Path(args.output)
-        out.write_text(doc, encoding="utf-8")
-        n_user = parsed["meta"]["n_user"]
-        print(f"Wrote {out} ({len(doc):,} chars, {n_user} user messages"
-              f"{', LLM-summarized' if args.llm else ''})", file=sys.stderr)
+    write_output(build_document(parsed, source, args), parsed, args)
 
 
 if __name__ == "__main__":

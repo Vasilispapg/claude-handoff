@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0 — 2026-08-23
+
+- **`--llm claude-cli`**: real LLM summaries through the locally-installed
+  Claude Code CLI — billed to your Pro/Max plan, **no API key needed**.
+  Scrubs inherited `CLAUDE*` session env vars so it also works when
+  claude-handoff is invoked from inside a Claude Code session.
+- **API-key aliases** (graphify-style, first set var wins):
+  `ANTHROPIC_API_KEY`/`CLAUDE_API`, `OPENAI_API_KEY`/`GPT_API`,
+  `GEMINI_API_KEY`/`GOOGLE_API_KEY`/`GEMINI_API`.
+- **Maintainability pass for the public repo** (SOLID, Python-idiomatic):
+  provider registry (`PROVIDERS`) — adding an LLM provider is one function
+  plus one table entry; `parse_session` and `main` split into
+  single-responsibility helpers. Deterministic output verified
+  byte-identical to v0.1.0 on real sessions.
+- Better `--llm` errors: missing-key messages name every accepted env var;
+  claude-cli failures surface the CLI's own error message.
+
 ## 0.1.0 — 2026-08-23
 
 Initial release.

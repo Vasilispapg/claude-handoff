@@ -1,6 +1,9 @@
 """Basic tests for claude_handoff. Run: python3 -m unittest discover -s tests"""
+import json
+import os
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,6 +69,105 @@ class RenderTests(unittest.TestCase):
                                    max_chars=150)
         self.assertIn("omitted", doc)
         self.assertIn("το login σπάει"[:10], doc)   # opening survives
+
+
+class ProviderTests(unittest.TestCase):
+    """API-key resolution (graphify-style env fallbacks) and claude-cli backend."""
+
+    def setUp(self):
+        self._saved = {}
+        for name in ("ANTHROPIC_API_KEY", "CLAUDE_API", "OPENAI_API_KEY",
+                     "GPT_API", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API"):
+            self._saved[name] = os.environ.pop(name, None)
+
+    def tearDown(self):
+        for name, val in self._saved.items():
+            if val is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = val
+
+    def test_primary_env_key_wins(self):
+        os.environ["ANTHROPIC_API_KEY"] = "sk-primary"
+        os.environ["CLAUDE_API"] = "sk-alias"
+        self.assertEqual(ch.provider_key("claude"), "sk-primary")
+
+    def test_alias_env_keys(self):
+        os.environ["CLAUDE_API"] = "sk-claude-alias"
+        os.environ["GPT_API"] = "sk-gpt-alias"
+        os.environ["GEMINI_API"] = "sk-gem-alias"
+        self.assertEqual(ch.provider_key("claude"), "sk-claude-alias")
+        self.assertEqual(ch.provider_key("openai"), "sk-gpt-alias")
+        self.assertEqual(ch.provider_key("gemini"), "sk-gem-alias")
+
+    def test_missing_key_message_names_all_accepted_vars(self):
+        with self.assertRaises(SystemExit) as cm:
+            ch.llm_summarize("openai", None, "transcript")
+        self.assertIn("OPENAI_API_KEY", str(cm.exception))
+        self.assertIn("GPT_API", str(cm.exception))
+
+    def test_claude_cli_parses_envelope_and_builds_command(self):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["input"] = kwargs.get("input", "")
+
+            class P:
+                returncode = 0
+                stdout = json.dumps({"result": "## Goal\nShip it."})
+                stderr = ""
+            return P()
+
+        with unittest.mock.patch.object(ch.subprocess, "run", fake_run), \
+                unittest.mock.patch.object(ch.shutil, "which",
+                                           lambda _: "/usr/bin/claude"):
+            out = ch.llm_summarize("claude-cli", "haiku", "the transcript")
+        self.assertEqual(out, "## Goal\nShip it.")
+        self.assertEqual(captured["cmd"][:2], ["claude", "-p"])
+        self.assertIn("--output-format", captured["cmd"])
+        self.assertIn("json", captured["cmd"])
+        self.assertIn("--no-session-persistence", captured["cmd"])
+        self.assertIn("--model", captured["cmd"])
+        self.assertIn("haiku", captured["cmd"])
+        self.assertIn("the transcript", captured["input"])
+
+    def test_claude_cli_missing_binary(self):
+        with unittest.mock.patch.object(ch.shutil, "which", lambda _: None):
+            with self.assertRaises(SystemExit) as cm:
+                ch.llm_summarize("claude-cli", None, "x")
+        self.assertIn("claude", str(cm.exception).lower())
+
+    def test_claude_cli_nonzero_exit(self):
+        def fake_run(cmd, **kwargs):
+            class P:
+                returncode = 1
+                stdout = ""
+                stderr = "boom"
+            return P()
+
+        with unittest.mock.patch.object(ch.subprocess, "run", fake_run), \
+                unittest.mock.patch.object(ch.shutil, "which",
+                                           lambda _: "/usr/bin/claude"):
+            with self.assertRaises(SystemExit) as cm:
+                ch.llm_summarize("claude-cli", None, "x")
+        self.assertIn("boom", str(cm.exception))
+
+    def test_claude_cli_surfaces_envelope_error(self):
+        def fake_run(cmd, **kwargs):
+            class P:
+                returncode = 1
+                stdout = json.dumps({"is_error": True,
+                                     "result": "Failed to authenticate."})
+                stderr = ""
+            return P()
+
+        with unittest.mock.patch.object(ch.subprocess, "run", fake_run), \
+                unittest.mock.patch.object(ch.shutil, "which",
+                                           lambda _: "/usr/bin/claude"):
+            with self.assertRaises(SystemExit) as cm:
+                ch.llm_summarize("claude-cli", None, "x")
+        self.assertIn("authenticate", str(cm.exception))
 
 
 class HelperTests(unittest.TestCase):

@@ -6,7 +6,7 @@ Claude Code stores every session locally as JSONL (`~/.claude/projects/…/*.jso
 
 - **Zero dependencies.** One Python file, stdlib only. Python 3.9+.
 - **Deterministic by default.** No API call, no cost, works offline.
-- **`--llm` when you want a real summary.** Claude, OpenAI or Gemini via your own API key.
+- **`--llm` when you want a real summary.** Claude, OpenAI or Gemini via your own API key — or `--llm claude-cli`, which runs your locally-installed Claude Code CLI on your existing Pro/Max plan: **no API key at all**.
 - **Noise-free.** Drops tool results, thinking blocks, system reminders, subagent chatter, slash-command envelopes. Keeps user intent, assistant answers, files modified, commands run.
 
 ## Install
@@ -28,6 +28,7 @@ claude-handoff path/to/session.jsonl -o -     # explicit file → stdout
 claude-handoff --include-tools     # keep collapsed per-tool-call detail
 
 # real LLM summary (goal / decisions / current state / next steps):
+claude-handoff --llm claude-cli                 # uses your Claude Code login — no API key
 export ANTHROPIC_API_KEY=sk-...
 claude-handoff --llm claude
 claude-handoff --llm openai --model gpt-4o
@@ -70,11 +71,20 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 | `-o FILE` / `-o -` | output file / stdout (default `handoff.md`) |
 | `--include-tools` | collapsed `<details>` blocks with each tool call |
 | `--max-chars N` | cap the transcript section (default 80 000; keeps start + recent end) |
-| `--llm claude\|openai\|gemini` | LLM summary instead of raw cleaned transcript |
+| `--llm claude\|openai\|gemini\|claude-cli` | LLM summary instead of raw cleaned transcript |
 | `--model ID` | override the LLM model |
 | `--with-transcript` | with `--llm`, also append the cleaned transcript |
 
-API keys are read from `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`. Nothing is sent anywhere unless you pass `--llm`.
+**API keys** (first set variable wins per provider):
+
+| Provider | Env vars | Notes |
+|---|---|---|
+| `claude` | `ANTHROPIC_API_KEY` or `CLAUDE_API` | Anthropic API |
+| `openai` | `OPENAI_API_KEY` or `GPT_API` | OpenAI API |
+| `gemini` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` or `GEMINI_API` | Google AI API |
+| `claude-cli` | *(none)* | Shells out to your installed [Claude Code](https://claude.ai/code) CLI; billed to your Pro/Max plan. Run `claude` once to log in. |
+
+Nothing is sent anywhere unless you pass `--llm`.
 
 ## Roadmap
 

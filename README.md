@@ -2,6 +2,12 @@
 
 ![claude-handoff: turn a messy Claude Code session into one clean handoff.md](docs/assets/banner.svg)
 
+[![PyPI](https://img.shields.io/pypi/v/claude-handoff)](https://pypi.org/project/claude-handoff/)
+[![Python](https://img.shields.io/pypi/pyversions/claude-handoff)](https://pypi.org/project/claude-handoff/)
+[![CI](https://github.com/Vasilispapg/claude-handoff/actions/workflows/ci.yml/badge.svg)](https://github.com/Vasilispapg/claude-handoff/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/pypi/dm/claude-handoff)](https://pypi.org/project/claude-handoff/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 **Summarize & export a Claude Code session into one clean `handoff.md` you can paste into Gemini, GPT, or another Claude — without the noise.**
 
 Claude Code stores every session locally as JSONL (`~/.claude/projects/…/*.jsonl`), full of tool calls, tool results, thinking blocks and system reminders. Existing exporters dump all of that into markdown. `claude-handoff` instead produces a **handoff document**: the actual conversation, what files were touched, what commands ran, and (optionally) an LLM-written summary of goal / decisions / current state / next steps — so the next model can just continue the work.

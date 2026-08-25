@@ -94,6 +94,10 @@ fragile parsing of that result text.
 | Handoff preamble addressed to the *receiving* assistant | The output must work as a first message with zero extra prompting. |
 | Package split + generated single file, v0.11.0 | The module hit ~2100 lines; readability won. Nine single-responsibility modules with acyclic `from .module import name` imports; `scripts/build_single.py` stitches them into `single/claude_handoff.py` so the curl-an-auditable-file install survives. The package is the only source of truth — CI fails when the artifact is stale, and the split was proven mechanical: outputs byte-identical before/after on all fixtures and a real multi-agent session. |
 | Streaming parse + grep prefilter, v0.11.0 | `load_records` became a generator (peak RSS parsing a 20 MB session: 80 MB → 26 MB) and `--grep` runs a cheap raw-text superset scan before paying for a full parse — only for needles JSON escaping cannot hide (ASCII without quotes, backslashes, newlines); anything else keeps the full-parse path. The scan is binary — ASCII needles compare against `bytes.lower()`ed raw blocks, skipping UTF-8 decode and Unicode folding (profiled at ~70% of --grep time). Worst-case store-wide grep: 3.3 s → 0.5 s. |
+| `--anonymize`, v0.12.0 | Redaction removes secrets; it doesn't remove *identity*. Anonymize collapses the home dir to `~` and replaces emails/IPv4s/the bare username with placeholders so a handoff can be pasted publicly (issues, forums). Opt-in — a handoff meant to continue work needs its real paths. Same egress seam as `redact_doc`; hook always redacts, MCP exposes it as a tool argument. |
+| Config defaults, v0.12.0 | `~/.config/claude-handoff/config.json` feeds `argparse.set_defaults`, so precedence is CLI flag > config > built-in with zero custom merging logic. Allow-listed keys only; `no_redact` is deliberately excluded — weakening redaction must be explicit per run. Broken configs warn and are ignored, never fatal. |
+| MCP LLM opt-in (`--allow-llm`), v0.12.0 | The MCP server stays deterministic by default ("no implicit paid calls"); starting it with `--allow-llm` adds `llm`/`model`/`focus` to the handoff tool schema, so cost is a server-operator decision, never a client's. |
+| Picker multi-select, v0.12.0 | `-i` accepts `1,3` / `2-4` (`_parse_pick`) and merges the picked sessions through the same machinery as `--merge` — composition over new code paths. |
 
 ## 4. Pipeline architecture
 
@@ -234,6 +238,8 @@ text bumped the counter. Fixed with a per-record `added_text` flag.
   v0.10.0 "egress" includes the final document itself (`redact_doc` on CLI
   markdown/JSON, hook files, and MCP replies) — the handoff's whole point
   is to be pasted somewhere else. Hook and MCP outputs always redact.
+  `--anonymize` (v0.12.0) goes one step further for *public* sharing:
+  identity (home paths, emails, IPs, username), not just secrets.
 - *LLM output*: untrusted text — only ever written into markdown, never
   executed or parsed as commands.
 - *Subprocess (`claude-cli`)*: fixed argv list (no `shell=True`), scrubbed

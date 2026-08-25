@@ -62,6 +62,10 @@ claude-handoff --project myrepo --merge
 
 # machine-readable:
 claude-handoff --format json -o session.json
+claude-handoff --list --format json   # session list as JSON
+
+# shareable in public (issues, forums): ~ paths, no emails/IPs/username
+claude-handoff --anonymize
 
 # auto-handoff: write one for every session when it ends
 claude-handoff --install-hook
@@ -115,13 +119,14 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 | `--project NAME` | pick latest session whose project path contains NAME |
 | `--last N` / `--since 2h` | keep only the tail of the conversation (N user turns / a time window) |
 | `--merge` | merge every session in scope into ONE handoff (session-break markers, summed activity) |
-| `--format md\|json` | markdown (default) or machine-readable JSON |
+| `--format md\|json` | markdown (default) or machine-readable JSON — also applies to `--list` |
 | `-o clipboard` | copy the handoff straight to the clipboard |
 | `--include-sidechains` | append full subagent transcripts (inline sidechains and `<session-id>/subagents/agent-*.jsonl`); their file/command activity is always counted |
-| `-i` / `--interactive` | pick the session from a numbered list |
+| `-i` / `--interactive` | pick session(s) from a numbered list — `1,3` or `2-4` merges several into one handoff |
 | `--install-hook` / `--uninstall-hook` | auto-write a handoff to `~/.claude/handoffs/` when each session ends |
 | `--completions bash\|zsh` | print a tab-completion snippet |
 | `--mcp` | run as an MCP server over stdio |
+| `--allow-llm` | with `--mcp`: let the `handoff` tool run LLM summaries (explicit opt-in) |
 | `-o FILE` / `-o -` | output file / stdout (default `handoff.md`) |
 | `--include-tools` | collapsed `<details>` blocks with each tool call |
 | `--max-chars N` | cap the transcript section (default 80 000; keeps start + recent end) |
@@ -132,6 +137,7 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 | `--with-transcript` | with `--llm`, also append the cleaned transcript |
 | `--grep TEXT` | pick newest session whose *conversation* contains TEXT; with `--list`/`-i` shows every match with a 🔍 preview |
 | `--fit TOKENS` | size the deterministic handoff to a token budget (`32k`, `128k`, `1m`) by tightening transcript truncation |
+| `--anonymize` | strip identity for public sharing: home paths → `~`, emails/IPs/username → placeholders |
 | `--no-redact` | keep secret-looking strings (default: redacted from every output, LLM or not) |
 | `--no-cache` | disable the chunk-note cache (`~/.cache/claude-handoff`) |
 
@@ -157,6 +163,21 @@ Nothing is sent anywhere unless you pass `--llm`.
 
 Sessions with API `usage` data also get a **Tokens** line in the header (input incl. cache / output). Map-reduce chunks run **4-way parallel** on API providers (`claude`/`openai`/`gemini`); `claude-cli` and `ollama` stay sequential by design.
 
+## Config (optional)
+
+Put defaults you always use in `~/.config/claude-handoff/config.json`
+(CLI flags always win; `CLAUDE_HANDOFF_CONFIG` overrides the path):
+
+```json
+{ "llm": "claude-cli", "fit": "32k", "include_tools": true }
+```
+
+Allowed keys: `llm`, `model`, `fit`, `output`, `include_tools`,
+`include_sidechains`, `max_chars`, `anonymize`, `focus`. Security
+switches (`no_redact`) are deliberately **not** configurable — weakening
+redaction must be an explicit per-run choice. A broken config warns and
+is ignored, never fatal.
+
 ## MCP server
 
 Any MCP client (Claude Desktop, Claude Code, …) can pull handoffs directly:
@@ -166,8 +187,9 @@ claude mcp add claude-handoff -- claude-handoff --mcp
 ```
 
 Tools: `list_sessions` (what's on this machine) and `handoff` (build the
-document for a session by name/project/path). Deterministic only — an MCP
-client never triggers paid LLM calls.
+document for a session by name/project/path; pass `anonymize` for a
+shareable version). Deterministic by default — an MCP client can only
+trigger LLM summaries when you start the server with `--allow-llm`.
 
 ## Roadmap
 

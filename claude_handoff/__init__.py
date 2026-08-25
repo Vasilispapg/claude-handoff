@@ -121,7 +121,7 @@ from .parse import (  # noqa: F401
                        slice_turns,
                        tool_summary,
 )
-from .redact import SECRET_RES, redact_doc, redact_secrets  # noqa: F401
+from .redact import SECRET_RES, anonymize_text, redact_doc, redact_secrets  # noqa: F401
 from .render import (  # noqa: F401
                        ASSISTANT_MSG_CAP,
                        DEFAULT_MAX_CHARS,

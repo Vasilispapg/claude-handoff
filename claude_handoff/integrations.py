@@ -16,8 +16,9 @@ from .discovery import (
     find_sessions,
     session_label,
 )
+from .llm import build_llm
 from .parse import looks_trivial, parse_session, slice_turns
-from .redact import redact_doc
+from .redact import anonymize_text, redact_doc
 from .render import DEFAULT_MAX_CHARS, build_deterministic
 from .webexport import is_web_export, parse_web_export
 
@@ -42,7 +43,7 @@ def _copy_clipboard(text: str) -> str:
 MCP_PROTOCOL = "2025-06-18"
 
 
-def _mcp_tools() -> list[dict]:
+def _mcp_tools(allow_llm: bool = False) -> list[dict]:
     return [
         {"name": "list_sessions",
          "description": "List Claude Code sessions on this machine, newest "
@@ -55,7 +56,10 @@ def _mcp_tools() -> list[dict]:
          "description": "Build a clean handoff document (markdown) from a "
                         "Claude Code session so another assistant can "
                         "continue the work. Deterministic — no LLM calls, "
-                        "no cost.",
+                        "no cost."
+                        + (" Pass llm for an LLM-written summary "
+                           "(this server allows it)." if allow_llm
+                           else ""),
          "inputSchema": {"type": "object", "properties": {
              "name": {"type": "string",
                       "description": "newest session whose title or first "
@@ -65,11 +69,19 @@ def _mcp_tools() -> list[dict]:
                       "description": "explicit session .jsonl path"},
              "last": {"type": "integer",
                       "description": "keep only the last N user turns"},
-             "include_tools": {"type": "boolean"}}}},
+             "include_tools": {"type": "boolean"},
+             "anonymize": {"type": "boolean"},
+             **({"llm": {"type": "string",
+                         "description": "provider for an LLM-written "
+                                        "summary: claude-cli, claude, "
+                                        "openai, gemini or ollama"},
+                 "model": {"type": "string"},
+                 "focus": {"type": "string"}} if allow_llm else {})}}},
     ]
 
 
-def _mcp_call(name: str, arguments: dict | None) -> str:
+def _mcp_call(name: str, arguments: dict | None,
+              allow_llm: bool = False) -> str:
     a = arguments or {}
     if name == "list_sessions":
         lines = []
@@ -102,13 +114,26 @@ def _mcp_call(name: str, arguments: dict | None) -> str:
             raise ValueError("session has no conversation turns")
         if a.get("last"):
             slice_turns(parsed, last=int(a["last"]))
-        return redact_doc(build_deterministic(
-            parsed, source, include_tools=bool(a.get("include_tools")),
-            max_chars=DEFAULT_MAX_CHARS), hint=False)
+        if a.get("llm"):
+            if not allow_llm:
+                raise ValueError(
+                    "LLM summaries are disabled — start the server "
+                    "with --allow-llm to enable them")
+            doc = redact_doc(build_llm(
+                parsed, source, str(a["llm"]), a.get("model"),
+                with_transcript=False, max_chars=DEFAULT_MAX_CHARS,
+                focus=a.get("focus")), hint=False)
+        else:
+            doc = redact_doc(build_deterministic(
+                parsed, source, include_tools=bool(a.get("include_tools")),
+                max_chars=DEFAULT_MAX_CHARS), hint=False)
+        if a.get("anonymize"):
+            doc, _ = anonymize_text(doc)
+        return doc
     raise ValueError(f"unknown tool: {name}")
 
 
-def run_mcp_server() -> None:
+def run_mcp_server(allow_llm: bool = False) -> None:
     """Minimal MCP server over stdio: newline-delimited JSON-RPC 2.0.
     stdout carries only protocol messages; logs go to stderr."""
 
@@ -142,12 +167,13 @@ def run_mcp_server() -> None:
                     "serverInfo": {"name": "claude-handoff",
                                    "version": __version__}})
             elif method == "tools/list":
-                reply(mid, {"tools": _mcp_tools()})
+                reply(mid, {"tools": _mcp_tools(allow_llm)})
             elif method == "tools/call":
                 params = msg.get("params") or {}
                 try:
                     text = _mcp_call(params.get("name"),
-                                     params.get("arguments"))
+                                     params.get("arguments"),
+                                     allow_llm=allow_llm)
                     reply(mid, {"content": [{"type": "text", "text": text}],
                                 "isError": False})
                 except Exception as e:  # tool errors → isError result

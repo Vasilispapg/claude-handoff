@@ -175,7 +175,25 @@ def grep_sessions(pattern: str,
     return hits
 
 
-def list_sessions(project_filter: str | None, grep: str | None = None) -> None:
+def _session_rows(sessions: list, previews: dict) -> list:
+    """Listing data shared by the text and JSON renderings of --list."""
+    rows = []
+    for p in sessions:
+        title, prompt = session_label(p)
+        row = {"path": str(p), "session_id": p.stem,
+               "project": p.parent.name.lstrip("-").replace("-", "/"),
+               "mtime": datetime.fromtimestamp(p.stat().st_mtime)
+               .strftime("%Y-%m-%d %H:%M"),
+               "size_kb": p.stat().st_size // 1024,
+               "title": title, "prompt": prompt}
+        if p in previews:
+            row["match"] = previews[p]
+        rows.append(row)
+    return rows
+
+
+def list_sessions(project_filter: str | None, grep: str | None = None,
+                  as_json: bool = False) -> None:
     if grep:
         pairs = grep_sessions(grep, project_filter)
         previews = dict(pairs)
@@ -183,32 +201,50 @@ def list_sessions(project_filter: str | None, grep: str | None = None) -> None:
         if not sessions:
             print(f"No session text matches {grep!r} under {PROJECTS_DIR}",
                   file=sys.stderr)
-            return
+            sessions = []
     else:
         previews = {}
         sessions = find_sessions(project_filter)
-    if not sessions:
-        print(f"No sessions found under {PROJECTS_DIR}", file=sys.stderr)
+        if not sessions:
+            print(f"No sessions found under {PROJECTS_DIR}", file=sys.stderr)
+    if as_json:  # always valid JSON on stdout, even with zero sessions
+        print(json.dumps(_session_rows(sessions, previews),
+                         ensure_ascii=False, indent=2))
         return
-    for p in sessions:
-        mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-        size_kb = p.stat().st_size // 1024
-        proj = p.parent.name.lstrip("-").replace("-", "/")
-        title, prompt = session_label(p)
-        label = f"{title} · {prompt}" if title else prompt
-        print(f"{mtime}  {size_kb:>6} KB  {p.stem[:8]}  {proj}")
+    for row in _session_rows(sessions, previews):
+        label = (f"{row['title']} · {row['prompt']}" if row["title"]
+                 else row["prompt"])
+        print(f"{row['mtime']}  {row['size_kb']:>6} KB  "
+              f"{row['session_id'][:8]}  {row['project']}")
         print(f"                              └─ {one_line(label, 110)}")
-        if p in previews:
-            print(f"                              🔍 {previews[p]}")
+        if "match" in row:
+            print(f"                              🔍 {row['match']}")
 
 
 # --------------------------------------------------------------------------- #
 #  Parsing
 # --------------------------------------------------------------------------- #
 
+def _parse_pick(choice: str, n: int) -> list:
+    """Parse a picker selection — "2", "1,3", "2-4" — into sorted
+    1-based indices. Returns [] when anything is out of range or
+    unparsable (the caller re-prompts)."""
+    picked = set()
+    for part in choice.split(","):
+        m = re.fullmatch(r"(\d+)(?:-(\d+))?", part.strip())
+        if not m:
+            return []
+        lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
+        if not 1 <= lo <= hi <= n:
+            return []
+        picked.update(range(lo, hi + 1))
+    return sorted(picked)
+
+
 def interactive_pick(project_filter: str | None,
-                     grep: str | None = None) -> Path:
-    """Numbered session picker (-i). Terminal only."""
+                     grep: str | None = None) -> list:
+    """Numbered session picker (-i). Terminal only. Accepts one
+    selection or several ("1,3", "2-4") — several get merged."""
     if not sys.stdin.isatty():
         raise SystemExit("-i needs a terminal (stdin is piped) — use "
                          "--name/--project for scripted selection.")
@@ -235,19 +271,17 @@ def interactive_pick(project_filter: str | None,
             print(f"      🔍 {previews[p]}", file=sys.stderr)
     while True:
         try:
-            choice = input(f"Pick a session [1-{len(sessions)}, q quits]: ")
+            choice = input(f"Pick session(s) [1-{len(sessions)}, "
+                           f"e.g. 2 or 1,3 or 2-4; q quits]: ")
         except (EOFError, KeyboardInterrupt):
             raise SystemExit("") from None
         choice = choice.strip().lower()
         if choice in ("q", "quit", ""):
             raise SystemExit("")
-        try:
-            idx = int(choice)
-            if 1 <= idx <= len(sessions):
-                return sessions[idx - 1]
-        except ValueError:
-            pass
-        print("Try a number from the list (or q).", file=sys.stderr)
+        idxs = _parse_pick(choice, len(sessions))
+        if idxs:
+            return [sessions[i - 1] for i in idxs]
+        print("Try e.g. 2, 1,3 or 2-4 (or q).", file=sys.stderr)
 
 
 def _newest_named_session(query: str, project_filter: str | None) -> Path:

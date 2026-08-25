@@ -56,7 +56,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -139,6 +139,37 @@ def fmt_ts(ts: str | None) -> str:
 # --------------------------------------------------------------------------- #
 #  redact
 # --------------------------------------------------------------------------- #
+
+_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b")
+_IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _home() -> Path:
+    return Path.home()
+
+
+def anonymize_text(text: str, home: Path | None = None) -> tuple[str, int]:
+    """Strip identity for public sharing: collapse the home directory to ~,
+    replace emails, IPv4s and the bare username with placeholders.
+
+    Opt-in (--anonymize): a handoff meant to continue work needs its real
+    paths; one pasted into an issue report or forum doesn't."""
+    home = home or _home()
+    n = 0
+    for probe in {str(home), home.as_posix()}:
+        hits = text.count(probe)
+        if hits:
+            text = text.replace(probe, "~")
+            n += hits
+    text, k = _EMAIL_RE.subn("[EMAIL]", text)
+    n += k
+    text, k = _IP_RE.subn("[IP]", text)
+    n += k
+    user = home.name
+    if len(user) >= 3:  # short names ("vi") would mangle ordinary prose
+        text, k = re.subn(rf"\b{re.escape(user)}\b", "[USER]", text)
+        n += k
+    return text, n
 
 # Secret-shaped strings are stripped from transcripts before any --llm call
 # (zero-trust: session logs routinely contain keys pasted into commands).
@@ -914,7 +945,25 @@ def grep_sessions(pattern: str,
     return hits
 
 
-def list_sessions(project_filter: str | None, grep: str | None = None) -> None:
+def _session_rows(sessions: list, previews: dict) -> list:
+    """Listing data shared by the text and JSON renderings of --list."""
+    rows = []
+    for p in sessions:
+        title, prompt = session_label(p)
+        row = {"path": str(p), "session_id": p.stem,
+               "project": p.parent.name.lstrip("-").replace("-", "/"),
+               "mtime": datetime.fromtimestamp(p.stat().st_mtime)
+               .strftime("%Y-%m-%d %H:%M"),
+               "size_kb": p.stat().st_size // 1024,
+               "title": title, "prompt": prompt}
+        if p in previews:
+            row["match"] = previews[p]
+        rows.append(row)
+    return rows
+
+
+def list_sessions(project_filter: str | None, grep: str | None = None,
+                  as_json: bool = False) -> None:
     if grep:
         pairs = grep_sessions(grep, project_filter)
         previews = dict(pairs)
@@ -922,32 +971,50 @@ def list_sessions(project_filter: str | None, grep: str | None = None) -> None:
         if not sessions:
             print(f"No session text matches {grep!r} under {PROJECTS_DIR}",
                   file=sys.stderr)
-            return
+            sessions = []
     else:
         previews = {}
         sessions = find_sessions(project_filter)
-    if not sessions:
-        print(f"No sessions found under {PROJECTS_DIR}", file=sys.stderr)
+        if not sessions:
+            print(f"No sessions found under {PROJECTS_DIR}", file=sys.stderr)
+    if as_json:  # always valid JSON on stdout, even with zero sessions
+        print(json.dumps(_session_rows(sessions, previews),
+                         ensure_ascii=False, indent=2))
         return
-    for p in sessions:
-        mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-        size_kb = p.stat().st_size // 1024
-        proj = p.parent.name.lstrip("-").replace("-", "/")
-        title, prompt = session_label(p)
-        label = f"{title} · {prompt}" if title else prompt
-        print(f"{mtime}  {size_kb:>6} KB  {p.stem[:8]}  {proj}")
+    for row in _session_rows(sessions, previews):
+        label = (f"{row['title']} · {row['prompt']}" if row["title"]
+                 else row["prompt"])
+        print(f"{row['mtime']}  {row['size_kb']:>6} KB  "
+              f"{row['session_id'][:8]}  {row['project']}")
         print(f"                              └─ {one_line(label, 110)}")
-        if p in previews:
-            print(f"                              🔍 {previews[p]}")
+        if "match" in row:
+            print(f"                              🔍 {row['match']}")
 
 
 # --------------------------------------------------------------------------- #
 #  Parsing
 # --------------------------------------------------------------------------- #
 
+def _parse_pick(choice: str, n: int) -> list:
+    """Parse a picker selection — "2", "1,3", "2-4" — into sorted
+    1-based indices. Returns [] when anything is out of range or
+    unparsable (the caller re-prompts)."""
+    picked = set()
+    for part in choice.split(","):
+        m = re.fullmatch(r"(\d+)(?:-(\d+))?", part.strip())
+        if not m:
+            return []
+        lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
+        if not 1 <= lo <= hi <= n:
+            return []
+        picked.update(range(lo, hi + 1))
+    return sorted(picked)
+
+
 def interactive_pick(project_filter: str | None,
-                     grep: str | None = None) -> Path:
-    """Numbered session picker (-i). Terminal only."""
+                     grep: str | None = None) -> list:
+    """Numbered session picker (-i). Terminal only. Accepts one
+    selection or several ("1,3", "2-4") — several get merged."""
     if not sys.stdin.isatty():
         raise SystemExit("-i needs a terminal (stdin is piped) — use "
                          "--name/--project for scripted selection.")
@@ -974,19 +1041,17 @@ def interactive_pick(project_filter: str | None,
             print(f"      🔍 {previews[p]}", file=sys.stderr)
     while True:
         try:
-            choice = input(f"Pick a session [1-{len(sessions)}, q quits]: ")
+            choice = input(f"Pick session(s) [1-{len(sessions)}, "
+                           f"e.g. 2 or 1,3 or 2-4; q quits]: ")
         except (EOFError, KeyboardInterrupt):
             raise SystemExit("") from None
         choice = choice.strip().lower()
         if choice in ("q", "quit", ""):
             raise SystemExit("")
-        try:
-            idx = int(choice)
-            if 1 <= idx <= len(sessions):
-                return sessions[idx - 1]
-        except ValueError:
-            pass
-        print("Try a number from the list (or q).", file=sys.stderr)
+        idxs = _parse_pick(choice, len(sessions))
+        if idxs:
+            return [sessions[i - 1] for i in idxs]
+        print("Try e.g. 2, 1,3 or 2-4 (or q).", file=sys.stderr)
 
 
 def _newest_named_session(query: str, project_filter: str | None) -> Path:
@@ -1669,7 +1734,7 @@ def _copy_clipboard(text: str) -> str:
 MCP_PROTOCOL = "2025-06-18"
 
 
-def _mcp_tools() -> list[dict]:
+def _mcp_tools(allow_llm: bool = False) -> list[dict]:
     return [
         {"name": "list_sessions",
          "description": "List Claude Code sessions on this machine, newest "
@@ -1682,7 +1747,10 @@ def _mcp_tools() -> list[dict]:
          "description": "Build a clean handoff document (markdown) from a "
                         "Claude Code session so another assistant can "
                         "continue the work. Deterministic — no LLM calls, "
-                        "no cost.",
+                        "no cost."
+                        + (" Pass llm for an LLM-written summary "
+                           "(this server allows it)." if allow_llm
+                           else ""),
          "inputSchema": {"type": "object", "properties": {
              "name": {"type": "string",
                       "description": "newest session whose title or first "
@@ -1692,11 +1760,19 @@ def _mcp_tools() -> list[dict]:
                       "description": "explicit session .jsonl path"},
              "last": {"type": "integer",
                       "description": "keep only the last N user turns"},
-             "include_tools": {"type": "boolean"}}}},
+             "include_tools": {"type": "boolean"},
+             "anonymize": {"type": "boolean"},
+             **({"llm": {"type": "string",
+                         "description": "provider for an LLM-written "
+                                        "summary: claude-cli, claude, "
+                                        "openai, gemini or ollama"},
+                 "model": {"type": "string"},
+                 "focus": {"type": "string"}} if allow_llm else {})}}},
     ]
 
 
-def _mcp_call(name: str, arguments: dict | None) -> str:
+def _mcp_call(name: str, arguments: dict | None,
+              allow_llm: bool = False) -> str:
     a = arguments or {}
     if name == "list_sessions":
         lines = []
@@ -1729,13 +1805,26 @@ def _mcp_call(name: str, arguments: dict | None) -> str:
             raise ValueError("session has no conversation turns")
         if a.get("last"):
             slice_turns(parsed, last=int(a["last"]))
-        return redact_doc(build_deterministic(
-            parsed, source, include_tools=bool(a.get("include_tools")),
-            max_chars=DEFAULT_MAX_CHARS), hint=False)
+        if a.get("llm"):
+            if not allow_llm:
+                raise ValueError(
+                    "LLM summaries are disabled — start the server "
+                    "with --allow-llm to enable them")
+            doc = redact_doc(build_llm(
+                parsed, source, str(a["llm"]), a.get("model"),
+                with_transcript=False, max_chars=DEFAULT_MAX_CHARS,
+                focus=a.get("focus")), hint=False)
+        else:
+            doc = redact_doc(build_deterministic(
+                parsed, source, include_tools=bool(a.get("include_tools")),
+                max_chars=DEFAULT_MAX_CHARS), hint=False)
+        if a.get("anonymize"):
+            doc, _ = anonymize_text(doc)
+        return doc
     raise ValueError(f"unknown tool: {name}")
 
 
-def run_mcp_server() -> None:
+def run_mcp_server(allow_llm: bool = False) -> None:
     """Minimal MCP server over stdio: newline-delimited JSON-RPC 2.0.
     stdout carries only protocol messages; logs go to stderr."""
 
@@ -1769,12 +1858,13 @@ def run_mcp_server() -> None:
                     "serverInfo": {"name": "claude-handoff",
                                    "version": __version__}})
             elif method == "tools/list":
-                reply(mid, {"tools": _mcp_tools()})
+                reply(mid, {"tools": _mcp_tools(allow_llm)})
             elif method == "tools/call":
                 params = msg.get("params") or {}
                 try:
                     text = _mcp_call(params.get("name"),
-                                     params.get("arguments"))
+                                     params.get("arguments"),
+                                     allow_llm=allow_llm)
                     reply(mid, {"content": [{"type": "text", "text": text}],
                                 "isError": False})
                 except Exception as e:  # tool errors → isError result
@@ -1931,7 +2021,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "--name match) into ONE handoff, oldest first")
     ap.add_argument("--format", choices=["md", "json"], default="md",
                     help="output format (default md; json is machine-"
-                         "readable)")
+                         "readable and also applies to --list)")
     ap.add_argument("--any", action="store_true",
                     help="ignore the current directory; consider sessions "
                          "of every project (default when outside a project)")
@@ -1958,6 +2048,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--mcp", action="store_true",
                     help="run as an MCP server over stdio (tools: "
                          "list_sessions, handoff)")
+    ap.add_argument("--allow-llm", action="store_true",
+                    help="with --mcp: let the handoff tool run LLM "
+                         "summaries (explicit opt-in — clients can "
+                         "then trigger paid/API calls)")
     ap.add_argument("--hook-stdin", action="store_true",
                     help=argparse.SUPPRESS)
     ap.add_argument("--max-chars", type=int, default=None,
@@ -1975,9 +2069,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "(e.g. --focus \"emphasize the API decisions\")")
     ap.add_argument("--with-transcript", action="store_true",
                     help="with --llm: also append the cleaned transcript")
+    ap.add_argument("--anonymize", action="store_true",
+                    help="strip identity for public sharing: home paths → ~, "
+                         "emails/IPs/username → placeholders")
     ap.add_argument("--no-redact", action="store_true",
-                    help="with --llm: do not strip secret-looking strings "
-                         "from the transcript before sending it")
+                    help="keep secret-looking strings (default: redacted "
+                         "from every output, LLM or not)")
     ap.add_argument("--no-cache", action="store_true",
                     help="with --llm: disable the chunk-note cache "
                          f"({CACHE_DIR})")
@@ -1988,11 +2085,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def resolve_source(args: argparse.Namespace) -> Path:
     """The session file to export: explicit path, picker, name match, or
     newest in scope."""
-    if getattr(args, "interactive", False):
-        scope = args.project
-        if not scope and not args.any:
-            scope = cwd_project_filter()
-        return interactive_pick(scope, grep=args.grep)
     if args.grep:
         if args.session or args.name:
             raise SystemExit("--grep searches content on its own — combine "
@@ -2096,7 +2188,14 @@ def build_document(parsed: dict, source: Path,
         doc = build_deterministic(parsed, source, args.include_tools,
                                   max_chars,
                                   include_sidechains=args.include_sidechains)
-    return doc if args.no_redact else redact_doc(doc)
+    if not args.no_redact:
+        doc = redact_doc(doc)
+    if getattr(args, "anonymize", False):
+        doc, n_anon = anonymize_text(doc)
+        if n_anon:
+            print(f"Anonymized {n_anon} identifying string(s) — home paths, "
+                  f"emails, IPs, username.", file=sys.stderr)
+    return doc
 
 
 def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
@@ -2122,13 +2221,62 @@ def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
           f"{', LLM-summarized' if args.llm else ''})", file=sys.stderr)
 
 
+_CONFIG_KEYS = {"llm", "model", "fit", "output", "include_tools",
+                "include_sidechains", "max_chars", "anonymize",
+                "focus"}
+
+
+def _config_path() -> Path:
+    env = os.environ.get("CLAUDE_HANDOFF_CONFIG")
+    return (Path(env) if env
+            else Path.home() / ".config" / "claude-handoff"
+            / "config.json")
+
+
+def _load_config() -> dict:
+    """Defaults from ~/.config/claude-handoff/config.json; CLI flags
+    win. Security switches (no_redact) are deliberately NOT
+    configurable — weakening redaction must be explicit per run.
+    A broken config warns and is ignored, never fatal."""
+    path = _config_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"Ignoring malformed config {path}: {e}", file=sys.stderr)
+        return {}
+    if not isinstance(raw, dict):
+        print(f"Ignoring config {path}: expected a JSON object.",
+              file=sys.stderr)
+        return {}
+    cfg = {}
+    for key, value in raw.items():
+        if key not in _CONFIG_KEYS:
+            print(f"Ignoring config key {key!r} (allowed: "
+                  f"{', '.join(sorted(_CONFIG_KEYS))}).",
+                  file=sys.stderr)
+            continue
+        if key == "fit":
+            try:
+                value = _parse_budget(str(value))
+            except argparse.ArgumentTypeError as e:
+                print(f"Ignoring config fit: {e}", file=sys.stderr)
+                continue
+        cfg[key] = value
+    return cfg
+
+
 def main(argv: list[str] | None = None) -> None:
-    args = build_arg_parser().parse_args(argv)
+    parser = build_arg_parser()
+    parser.set_defaults(**_load_config())
+    args = parser.parse_args(argv)
     if args.fit and (args.llm or args.max_chars is not None):
         raise SystemExit("--fit sizes the deterministic output on its own — "
-                         "drop --llm / --max-chars when using it.")
+                         "drop --llm / --max-chars when using it "
+                         "(--fit may also come from your config file).")
     if args.mcp:
-        run_mcp_server()
+        run_mcp_server(allow_llm=args.allow_llm)
         return
     if args.completions:
         print_completions(args.completions)
@@ -2143,8 +2291,15 @@ def main(argv: list[str] | None = None) -> None:
         if args.session and is_web_export(Path(args.session).expanduser()):
             list_export_conversations(Path(args.session).expanduser())
         else:
-            list_sessions(args.project, grep=args.grep)
+            list_sessions(args.project, grep=args.grep,
+                          as_json=args.format == "json")
         return
+    picked: list = []
+    if args.interactive and not args.merge:
+        scope = args.project
+        if not scope and not args.any:
+            scope = cwd_project_filter()
+        picked = interactive_pick(scope, grep=args.grep)
     if args.merge:
         if args.session:
             raise SystemExit("--merge discovers sessions itself — drop the "
@@ -2172,8 +2327,16 @@ def main(argv: list[str] | None = None) -> None:
         parsed = merge_parsed(parsed_list)
         source = Path(f"{len(parsed_list)} merged sessions"
                       + (f" [{scope}]" if scope else ""))
+    elif len(picked) > 1:
+        parsed_list = [parse_session(p) for p in
+                       sorted(picked, key=lambda p: p.stat().st_mtime)]
+        parsed_list = [p for p in parsed_list if p["turns"]]
+        print(f"Merging {len(parsed_list)} picked sessions.",
+              file=sys.stderr)
+        parsed = merge_parsed(parsed_list)
+        source = Path(f"{len(parsed_list)} merged sessions")
     else:
-        source = resolve_source(args)
+        source = picked[0] if picked else resolve_source(args)
         if is_web_export(source):
             parsed = parse_web_export(source, name_filter=args.name)
         else:

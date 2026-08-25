@@ -1,8 +1,40 @@
-"""Secret redaction — applied before any egress (LLM or document)."""
+"""Secret redaction & anonymization — applied before any egress."""
 from __future__ import annotations
 
 import re
 import sys
+from pathlib import Path
+
+_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b")
+_IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _home() -> Path:
+    return Path.home()
+
+
+def anonymize_text(text: str, home: Path | None = None) -> tuple[str, int]:
+    """Strip identity for public sharing: collapse the home directory to ~,
+    replace emails, IPv4s and the bare username with placeholders.
+
+    Opt-in (--anonymize): a handoff meant to continue work needs its real
+    paths; one pasted into an issue report or forum doesn't."""
+    home = home or _home()
+    n = 0
+    for probe in {str(home), home.as_posix()}:
+        hits = text.count(probe)
+        if hits:
+            text = text.replace(probe, "~")
+            n += hits
+    text, k = _EMAIL_RE.subn("[EMAIL]", text)
+    n += k
+    text, k = _IP_RE.subn("[IP]", text)
+    n += k
+    user = home.name
+    if len(user) >= 3:  # short names ("vi") would mangle ordinary prose
+        text, k = re.subn(rf"\b{re.escape(user)}\b", "[USER]", text)
+        n += k
+    return text, n
 
 # Secret-shaped strings are stripped from transcripts before any --llm call
 # (zero-trust: session logs routinely contain keys pasted into commands).

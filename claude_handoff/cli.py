@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -21,7 +23,7 @@ from .discovery import (
 from .integrations import _copy_clipboard, install_hook, run_hook_mode, run_mcp_server
 from .llm import CACHE_DIR, PROVIDERS, build_llm, llm_summarize
 from .parse import looks_trivial, merge_parsed, parse_session, slice_turns
-from .redact import redact_doc, redact_secrets
+from .redact import anonymize_text, redact_doc, redact_secrets
 from .render import (
     DEFAULT_MAX_CHARS,
     build_deterministic,
@@ -90,7 +92,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "--name match) into ONE handoff, oldest first")
     ap.add_argument("--format", choices=["md", "json"], default="md",
                     help="output format (default md; json is machine-"
-                         "readable)")
+                         "readable and also applies to --list)")
     ap.add_argument("--any", action="store_true",
                     help="ignore the current directory; consider sessions "
                          "of every project (default when outside a project)")
@@ -117,6 +119,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--mcp", action="store_true",
                     help="run as an MCP server over stdio (tools: "
                          "list_sessions, handoff)")
+    ap.add_argument("--allow-llm", action="store_true",
+                    help="with --mcp: let the handoff tool run LLM "
+                         "summaries (explicit opt-in — clients can "
+                         "then trigger paid/API calls)")
     ap.add_argument("--hook-stdin", action="store_true",
                     help=argparse.SUPPRESS)
     ap.add_argument("--max-chars", type=int, default=None,
@@ -134,9 +140,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "(e.g. --focus \"emphasize the API decisions\")")
     ap.add_argument("--with-transcript", action="store_true",
                     help="with --llm: also append the cleaned transcript")
+    ap.add_argument("--anonymize", action="store_true",
+                    help="strip identity for public sharing: home paths → ~, "
+                         "emails/IPs/username → placeholders")
     ap.add_argument("--no-redact", action="store_true",
-                    help="with --llm: do not strip secret-looking strings "
-                         "from the transcript before sending it")
+                    help="keep secret-looking strings (default: redacted "
+                         "from every output, LLM or not)")
     ap.add_argument("--no-cache", action="store_true",
                     help="with --llm: disable the chunk-note cache "
                          f"({CACHE_DIR})")
@@ -147,11 +156,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def resolve_source(args: argparse.Namespace) -> Path:
     """The session file to export: explicit path, picker, name match, or
     newest in scope."""
-    if getattr(args, "interactive", False):
-        scope = args.project
-        if not scope and not args.any:
-            scope = cwd_project_filter()
-        return interactive_pick(scope, grep=args.grep)
     if args.grep:
         if args.session or args.name:
             raise SystemExit("--grep searches content on its own — combine "
@@ -255,7 +259,14 @@ def build_document(parsed: dict, source: Path,
         doc = build_deterministic(parsed, source, args.include_tools,
                                   max_chars,
                                   include_sidechains=args.include_sidechains)
-    return doc if args.no_redact else redact_doc(doc)
+    if not args.no_redact:
+        doc = redact_doc(doc)
+    if getattr(args, "anonymize", False):
+        doc, n_anon = anonymize_text(doc)
+        if n_anon:
+            print(f"Anonymized {n_anon} identifying string(s) — home paths, "
+                  f"emails, IPs, username.", file=sys.stderr)
+    return doc
 
 
 def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
@@ -281,13 +292,62 @@ def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
           f"{', LLM-summarized' if args.llm else ''})", file=sys.stderr)
 
 
+_CONFIG_KEYS = {"llm", "model", "fit", "output", "include_tools",
+                "include_sidechains", "max_chars", "anonymize",
+                "focus"}
+
+
+def _config_path() -> Path:
+    env = os.environ.get("CLAUDE_HANDOFF_CONFIG")
+    return (Path(env) if env
+            else Path.home() / ".config" / "claude-handoff"
+            / "config.json")
+
+
+def _load_config() -> dict:
+    """Defaults from ~/.config/claude-handoff/config.json; CLI flags
+    win. Security switches (no_redact) are deliberately NOT
+    configurable — weakening redaction must be explicit per run.
+    A broken config warns and is ignored, never fatal."""
+    path = _config_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"Ignoring malformed config {path}: {e}", file=sys.stderr)
+        return {}
+    if not isinstance(raw, dict):
+        print(f"Ignoring config {path}: expected a JSON object.",
+              file=sys.stderr)
+        return {}
+    cfg = {}
+    for key, value in raw.items():
+        if key not in _CONFIG_KEYS:
+            print(f"Ignoring config key {key!r} (allowed: "
+                  f"{', '.join(sorted(_CONFIG_KEYS))}).",
+                  file=sys.stderr)
+            continue
+        if key == "fit":
+            try:
+                value = _parse_budget(str(value))
+            except argparse.ArgumentTypeError as e:
+                print(f"Ignoring config fit: {e}", file=sys.stderr)
+                continue
+        cfg[key] = value
+    return cfg
+
+
 def main(argv: list[str] | None = None) -> None:
-    args = build_arg_parser().parse_args(argv)
+    parser = build_arg_parser()
+    parser.set_defaults(**_load_config())
+    args = parser.parse_args(argv)
     if args.fit and (args.llm or args.max_chars is not None):
         raise SystemExit("--fit sizes the deterministic output on its own — "
-                         "drop --llm / --max-chars when using it.")
+                         "drop --llm / --max-chars when using it "
+                         "(--fit may also come from your config file).")
     if args.mcp:
-        run_mcp_server()
+        run_mcp_server(allow_llm=args.allow_llm)
         return
     if args.completions:
         print_completions(args.completions)
@@ -302,8 +362,15 @@ def main(argv: list[str] | None = None) -> None:
         if args.session and is_web_export(Path(args.session).expanduser()):
             list_export_conversations(Path(args.session).expanduser())
         else:
-            list_sessions(args.project, grep=args.grep)
+            list_sessions(args.project, grep=args.grep,
+                          as_json=args.format == "json")
         return
+    picked: list = []
+    if args.interactive and not args.merge:
+        scope = args.project
+        if not scope and not args.any:
+            scope = cwd_project_filter()
+        picked = interactive_pick(scope, grep=args.grep)
     if args.merge:
         if args.session:
             raise SystemExit("--merge discovers sessions itself — drop the "
@@ -331,8 +398,16 @@ def main(argv: list[str] | None = None) -> None:
         parsed = merge_parsed(parsed_list)
         source = Path(f"{len(parsed_list)} merged sessions"
                       + (f" [{scope}]" if scope else ""))
+    elif len(picked) > 1:
+        parsed_list = [parse_session(p) for p in
+                       sorted(picked, key=lambda p: p.stat().st_mtime)]
+        parsed_list = [p for p in parsed_list if p["turns"]]
+        print(f"Merging {len(parsed_list)} picked sessions.",
+              file=sys.stderr)
+        parsed = merge_parsed(parsed_list)
+        source = Path(f"{len(parsed_list)} merged sessions")
     else:
-        source = resolve_source(args)
+        source = picked[0] if picked else resolve_source(args)
         if is_web_export(source):
             parsed = parse_web_export(source, name_filter=args.name)
         else:

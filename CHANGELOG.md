@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.0 — 2026-08-26
+
+- **`--anonymize`**: strip identity for public sharing — home paths
+  collapse to `~`, emails/IPv4s/username become placeholders. Opt-in,
+  applied at the same egress seam as redaction; also available as an
+  `anonymize` argument on the MCP `handoff` tool.
+- **Picker multi-select**: `-i` accepts `1,3` or `2-4` and merges the
+  picked sessions into one handoff.
+- **`--mcp --allow-llm`**: explicit opt-in that lets MCP clients
+  request LLM-written summaries (`llm`/`model`/`focus` tool args);
+  without it the server stays strictly deterministic.
+- **`--list --format json`**: machine-readable session listing (path,
+  id, project, mtime, size, title, prompt, 🔍 match with `--grep`).
+- **Config defaults**: `~/.config/claude-handoff/config.json`
+  (`CLAUDE_HANDOFF_CONFIG` overrides) feeds allow-listed defaults —
+  CLI flags always win; `no_redact` is deliberately not configurable.
+
 ## 0.11.0 — 2026-08-25
 
 - **Package split**: the single 2100-line module became the

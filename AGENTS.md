@@ -66,9 +66,11 @@ Import direction flows strictly downward (no cycles): `textutil` →
   `chat_messages` AND ChatGPT `mapping`/`current_node`; same parsed shape
   as `parse_session`), `list_export_conversations`
 - Merge & formats (`parse.py`/`render.py`): `merge_parsed` (session-break turns), `build_json`
-- UX & integrations (`discovery.py`/`integrations.py`): `interactive_pick` (-i), `print_completions`,
+- UX & integrations (`discovery.py`/`integrations.py`): `interactive_pick`
+  (-i; multi-select via `_parse_pick` merges), `print_completions`,
   `run_mcp_server`/`_mcp_tools`/`_mcp_call` (--mcp; stdout carries only
-  JSON-RPC — log to stderr), `_copy_clipboard`
+  JSON-RPC — log to stderr; LLM summaries only behind --allow-llm),
+  `_copy_clipboard`
 - Tail filters (`parse.py`): `slice_turns` (`--last`, `--since`), `_since_cutoff`
 - Hook (`integrations.py`): `install_hook` / `run_hook_mode` (`--install-hook`,
   `--hook-stdin`) — hook mode swallows all errors by design: a hook must
@@ -89,8 +91,10 @@ Import direction flows strictly downward (no cycles): `textutil` →
 - CLI (`cli.py`): `_HelpfulParser` (the one allowed class — argparse's designed
   extension point, so usage errors point to --help/--list),
   `build_arg_parser`, `resolve_source` (path → grep → name match → newest),
-  `redact_doc` (output redaction), `_parse_budget`/`_fit_transcript_cap`
-  (--fit token budgets), `build_document`, `write_output`, `main`
+  `redact_doc`/`anonymize_text` (output redaction & --anonymize),
+  `_parse_budget`/`_fit_transcript_cap` (--fit token budgets),
+  `_load_config` (config defaults; no_redact is deliberately not
+  configurable), `build_document`, `write_output`, `main`
 
 **Adding an LLM provider** = one `_call_*` function + one `PROVIDERS`
 entry. Do not add if/elif provider chains anywhere (open/closed).

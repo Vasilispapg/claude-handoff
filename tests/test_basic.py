@@ -8,6 +8,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+# hermetic: a real user config must never leak into test runs
+os.environ.setdefault("CLAUDE_HANDOFF_CONFIG", str(ROOT / "no-such-config"))
 
 import claude_handoff as ch  # noqa: E402
 
@@ -421,6 +423,50 @@ COMPACTED = ROOT / "tests" / "fixtures" / "compacted_session.jsonl"
 CHATGPT_EXPORT = ROOT / "tests" / "fixtures" / "chatgpt_export.json"
 
 
+class ListJsonTests(unittest.TestCase):
+    """--list --format json: machine-readable session listing."""
+
+    def test_list_json_structure(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with unittest.mock.patch.object(ch.discovery, "find_sessions",
+                                        lambda *a, **k: [FIXTURE, TRIVIAL]), \
+                contextlib.redirect_stdout(buf):
+            ch.list_sessions(None, as_json=True)
+        data = json.loads(buf.getvalue())
+        self.assertEqual(len(data), 2)
+        for key in ("path", "session_id", "project", "mtime", "size_kb",
+                    "title", "prompt"):
+            self.assertIn(key, data[0])
+        self.assertEqual(data[0]["title"], "Fix login bug in auth.py")
+
+    def test_list_json_with_grep_includes_match(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with unittest.mock.patch.object(
+                ch.discovery, "find_sessions",
+                lambda *a, **k: [AGENT_SESSION, FIXTURE]), \
+                contextlib.redirect_stdout(buf):
+            ch.list_sessions(None, grep="unicode", as_json=True)
+        data = json.loads(buf.getvalue())
+        self.assertEqual(len(data), 1)
+        self.assertIn("unicode", data[0]["match"].lower())
+
+    def test_cli_list_format_json(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with unittest.mock.patch.object(ch.discovery, "find_sessions",
+                                        lambda *a, **k: [FIXTURE]), \
+                contextlib.redirect_stdout(buf), \
+                contextlib.redirect_stderr(io.StringIO()):
+            ch.main(["--list", "--format", "json"])
+        data = json.loads(buf.getvalue())
+        self.assertEqual(data[0]["session_id"], "classic_session")
+
+
 class FitTests(unittest.TestCase):
     """--fit: size the deterministic handoff to a token budget."""
 
@@ -559,7 +605,7 @@ class GrepTests(unittest.TestCase):
                 unittest.mock.patch("builtins.input", side_effect=["1"]), \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(ch.interactive_pick(None, grep="unicode"),
-                             FIXTURE)
+                             [FIXTURE])
 
 
 class PickerTests(unittest.TestCase):
@@ -575,7 +621,49 @@ class PickerTests(unittest.TestCase):
                 unittest.mock.patch("builtins.input",
                                     side_effect=["nope", "2"]), \
                 contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(ch.interactive_pick(None), FIXTURE)
+            self.assertEqual(ch.interactive_pick(None), [FIXTURE])
+
+    def test_parse_pick_forms(self):
+        self.assertEqual(ch.discovery._parse_pick("2", 5), [2])
+        self.assertEqual(ch.discovery._parse_pick("1,3", 5), [1, 3])
+        self.assertEqual(ch.discovery._parse_pick("2-4", 5), [2, 3, 4])
+        self.assertEqual(ch.discovery._parse_pick("3,1-2,3", 5), [1, 2, 3])
+        self.assertEqual(ch.discovery._parse_pick("0", 5), [])
+        self.assertEqual(ch.discovery._parse_pick("6", 5), [])
+        self.assertEqual(ch.discovery._parse_pick("x", 5), [])
+
+    def test_interactive_pick_returns_multiple(self):
+        import contextlib
+        import io
+        with unittest.mock.patch.object(ch.discovery, "find_sessions",
+                                        lambda *a, **k: [TRIVIAL, FIXTURE]), \
+                unittest.mock.patch.object(ch.sys.stdin, "isatty",
+                                           lambda: True), \
+                unittest.mock.patch("builtins.input",
+                                    side_effect=["1,2"]), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ch.interactive_pick(None), [TRIVIAL, FIXTURE])
+
+    def test_main_interactive_multi_select_merges(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "h.md"
+            with unittest.mock.patch.object(
+                    ch.discovery, "find_sessions",
+                    lambda *a, **k: [COMPACTED, FIXTURE]), \
+                    unittest.mock.patch.object(ch.sys.stdin, "isatty",
+                                               lambda: True), \
+                    unittest.mock.patch("builtins.input",
+                                        side_effect=["1,2"]), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.main(["-i", "-o", str(out)])
+            doc = out.read_text(encoding="utf-8")
+        self.assertIn("Session 1", doc)
+        self.assertIn("Session 2", doc)
+        self.assertIn("unicode", doc)              # from FIXTURE
+        self.assertIn("rate limiting", doc)        # from COMPACTED
 
     def test_interactive_needs_terminal(self):
         with unittest.mock.patch.object(ch.discovery, "find_sessions",
@@ -644,6 +732,41 @@ class McpTests(unittest.TestCase):
         self.assertIn("Conversation handoff", ok["content"][0]["text"])
         self.assertIn("last 1 of 2", ok["content"][0]["text"])
         self.assertTrue(replies[4]["result"]["isError"])
+
+
+class McpLlmTests(unittest.TestCase):
+    """--mcp --allow-llm: explicit opt-in for LLM summaries over MCP."""
+
+    def _fake_provider(self, calls):
+        def fake_call(key, model, prompt):
+            calls.append(prompt)
+            return "## Goal\nSummarized over MCP."
+        return unittest.mock.patch.dict(ch.PROVIDERS["claude-cli"],
+                                        {"call": fake_call})
+
+    def test_llm_arg_refused_without_flag(self):
+        with self.assertRaises(ValueError) as cm:
+            ch._mcp_call("handoff", {"path": str(FIXTURE),
+                                     "llm": "claude-cli"})
+        self.assertIn("--allow-llm", str(cm.exception))
+
+    def test_llm_summary_with_flag(self):
+        import contextlib
+        import io
+        calls = []
+        with self._fake_provider(calls), \
+                contextlib.redirect_stderr(io.StringIO()):
+            out = ch._mcp_call("handoff", {"path": str(FIXTURE),
+                                           "llm": "claude-cli"},
+                               allow_llm=True)
+        self.assertIn("Summarized over MCP", out)
+        self.assertTrue(calls)                     # provider really invoked
+
+    def test_tools_schema_advertises_llm_only_with_flag(self):
+        without = json.dumps(ch._mcp_tools())
+        withit = json.dumps(ch._mcp_tools(allow_llm=True))
+        self.assertNotIn('"llm"', without)
+        self.assertIn('"llm"', withit)
 
 
 class ChatGPTExportTests(unittest.TestCase):
@@ -986,6 +1109,131 @@ class RedactOutputTests(unittest.TestCase):
             text = files[0].read_text(encoding="utf-8")
             self.assertNotIn("sk-ant-abc123", text)
             self.assertIn("[REDACTED]", text)
+
+
+class ConfigTests(unittest.TestCase):
+    """~/.config/claude-handoff/config.json supplies defaults; flags win."""
+
+    def _with_cfg(self, content):
+        import tempfile
+        td = tempfile.TemporaryDirectory()
+        path = Path(td.name) / "config.json"
+        if content is not None:
+            path.write_text(content, encoding="utf-8")
+        env = unittest.mock.patch.dict(
+            ch.os.environ, {"CLAUDE_HANDOFF_CONFIG": str(path)})
+        return td, env
+
+    def test_config_supplies_defaults(self):
+        td, env = self._with_cfg(
+            '{"include_tools": true, "fit": "8k", "output": "-"}')
+        with td, env:
+            cfg = ch.cli._load_config()
+        self.assertEqual(cfg, {"include_tools": True, "fit": 8000,
+                               "output": "-"})
+
+    def test_cli_flag_beats_config(self):
+        td, env = self._with_cfg('{"output": "-"}')
+        with td, env:
+            p = ch.build_arg_parser()
+            p.set_defaults(**ch.cli._load_config())
+            self.assertEqual(p.parse_args(["-o", "x.md"]).output, "x.md")
+            self.assertEqual(p.parse_args([]).output, "-")
+
+    def test_disallowed_and_unknown_keys_dropped_with_warning(self):
+        import contextlib
+        import io
+        td, env = self._with_cfg(
+            '{"no_redact": true, "bogus": 1, "llm": "ollama"}')
+        buf = io.StringIO()
+        with td, env, contextlib.redirect_stderr(buf):
+            cfg = ch.cli._load_config()
+        self.assertEqual(cfg, {"llm": "ollama"})
+        self.assertIn("no_redact", buf.getvalue())
+        self.assertIn("bogus", buf.getvalue())
+
+    def test_malformed_config_never_fatal(self):
+        import contextlib
+        import io
+        td, env = self._with_cfg("{not json")
+        with td, env, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ch.cli._load_config(), {})
+
+    def test_missing_config_is_empty(self):
+        td, env = self._with_cfg(None)
+        with td, env:
+            self.assertEqual(ch.cli._load_config(), {})
+
+    def test_main_applies_config(self):
+        import contextlib
+        import io
+        import tempfile
+        td, env = self._with_cfg('{"include_tools": true}')
+        with td, env, tempfile.TemporaryDirectory() as out_td, \
+                contextlib.redirect_stderr(io.StringIO()):
+            out = Path(out_td) / "h.md"
+            ch.main([str(FIXTURE), "-o", str(out)])
+            doc = out.read_text(encoding="utf-8")
+        self.assertIn("<details>", doc)        # include_tools via config
+
+
+class AnonymizeTests(unittest.TestCase):
+    """--anonymize: strip identity (paths, emails, IPs) for public sharing."""
+
+    def test_anonymize_text_patterns(self):
+        text = ("see /Users/vspapg/Code/app/main.py and mail me at "
+                "v.pap@example.com from 192.168.1.77; vspapg wrote it")
+        out, n = ch.anonymize_text(text, home=Path("/Users/vspapg"))
+        self.assertIn("~/Code/app/main.py", out)
+        self.assertNotIn("/Users/vspapg", out)
+        self.assertIn("[EMAIL]", out)
+        self.assertNotIn("v.pap@example.com", out)
+        self.assertIn("[IP]", out)
+        self.assertNotIn("192.168.1.77", out)
+        self.assertNotIn("vspapg", out)               # bare username too
+        self.assertGreaterEqual(n, 4)
+
+    def test_short_usernames_left_alone(self):
+        out, _ = ch.anonymize_text("vi is an editor", home=Path("/home/vi"))
+        self.assertIn("vi is an editor", out)          # too short to scrub
+
+    def test_version_strings_not_ips(self):
+        out, _ = ch.anonymize_text("claude-handoff 0.11.0 on 2.1.241",
+                                   home=Path("/home/nobody"))
+        self.assertNotIn("[IP]", out)
+
+    def test_cli_flag_anonymizes_document(self):
+        import contextlib
+        import io
+        parsed = ch.parse_session(SECRET)
+        args = ch.build_arg_parser().parse_args([str(SECRET), "--anonymize"])
+        with contextlib.redirect_stderr(io.StringIO()), \
+                unittest.mock.patch.object(ch.redact, "_home",
+                                           lambda: Path("/home/vspapg")):
+            doc = ch.build_document(parsed, SECRET, args)
+        self.assertIn("~/deploy", doc)
+        self.assertNotIn("/home/vspapg", doc)
+        self.assertNotIn("sk-ant-abc123", doc)         # redaction still on
+
+    def test_off_by_default(self):
+        import contextlib
+        import io
+        parsed = ch.parse_session(SECRET)
+        args = ch.build_arg_parser().parse_args([str(SECRET)])
+        with contextlib.redirect_stderr(io.StringIO()):
+            doc = ch.build_document(parsed, SECRET, args)
+        self.assertIn("/home/vspapg/deploy", doc)      # real paths kept
+
+    def test_mcp_handoff_accepts_anonymize(self):
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()), \
+                unittest.mock.patch.object(ch.redact, "_home",
+                                           lambda: Path("/home/vspapg")):
+            out = ch._mcp_call("handoff", {"path": str(SECRET),
+                                           "anonymize": True})
+        self.assertIn("~/deploy", out)
+        self.assertNotIn("/home/vspapg", out)
 
 
 class ZeroTrustTests(unittest.TestCase):

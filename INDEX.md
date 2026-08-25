@@ -20,10 +20,12 @@ claude-handoff/
 │                            (scripts/build_single.py; CI keeps it fresh)
 ├── scripts/
 │   └── build_single.py    ← stitches the package into single/…, --check mode
-├── README.md              ← what it is, install, usage, flags, providers,
-│                            comparison to other tools, roadmap
+├── README.md              ← 60-second scenarios, install, project memory,
+│                            recipes, privacy, troubleshooting, full flag
+│                            reference, comparison, roadmap
 ├── INDEX.md               ← this file
-├── AGENTS.md              ← instructions & invariants for AI coding agents
+├── AGENTS.md              ← agent onboarding: green-in-4-commands, invariants,
+│                            architecture map, workflow & release checklists
 ├── CLAUDE.md              ← pointer to AGENTS.md for Claude Code
 ├── CONTRIBUTING.md        ← how to contribute (fixtures-first workflow)
 ├── CHANGELOG.md           ← release history (0.1.0 → current)

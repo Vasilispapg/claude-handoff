@@ -2,16 +2,40 @@
 
 ## What this project is
 
-`claude-handoff` turns a Claude Code session transcript (JSONL in
-`~/.claude/projects`) into a single clean `handoff.md` that another LLM
-(Gemini, GPT, another Claude) can continue from. One Python file, stdlib
-only. Read `docs/DEVELOPMENT.md` for the full architecture and the JSONL
-schema notes before touching the parser.
+`claude-handoff` turns Claude Code session transcripts (JSONL in
+`~/.claude/projects`) into a single clean `handoff.md` another LLM can
+continue from, and distills a project's whole history into a persistent
+memory brief (`--brief`) injected at session start. Stdlib only; runtime
+code is the `claude_handoff/` package plus a **generated** single-file
+build in `single/`.
+
+## Start here (green in four commands)
+
+```bash
+python3 -m unittest discover -s tests -v      # run tests
+python3 -m claude_handoff tests/fixtures/agent_session.jsonl -o -   # smoke run
+python3 scripts/build_single.py --check       # single-file build is fresh
+uvx ruff check claude_handoff scripts tests   # lint (config in pyproject)
+```
+
+If all four pass, the tree is healthy. Packaging check when you touched
+`pyproject.toml`: `pip install -e . && claude-handoff --version && chf --version`.
+
+Orientation — read in this order, only as far as your task needs:
+
+| You want to… | Read |
+|---|---|
+| Understand what the tool does for users | `README.md` (60-second scenarios + full flag reference) |
+| Find which file holds what | `INDEX.md`, then the architecture map below |
+| Touch the parser / JSONL schema | `docs/DEVELOPMENT.md` §2 (schema notes) — **mandatory before parser edits** |
+| Understand why a design is the way it is | `docs/DEVELOPMENT.md` §3 (decision log, one row per decision) |
+| Follow the working agreements | Invariants + workflows + gotchas below |
 
 ## Hard invariants — do not break these
 
 - **Zero runtime dependencies.** Stdlib only. Do not add anything to
   `pyproject.toml` dependencies; do not import third-party packages.
+  (Dev-only tooling like ruff via `uvx` is fine.)
 - **One package, one generated single file.** Runtime code lives in
   the `claude_handoff/` package (map below) with acyclic
   `from .module import name` imports. `single/claude_handoff.py` is
@@ -26,31 +50,27 @@ schema notes before touching the parser.
   network — via stdlib `urllib` for API providers, or by spawning the local
   `claude` CLI for `--llm claude-cli`. No other subprocesses, no SDKs.
 - **Never invent transcript content.** The exporter reorganizes and
-  truncates; it must not fabricate.
+  truncates; it must not fabricate. LLM outputs that claim facts carry
+  session citations so they stay verifiable.
 - **Redact before egress.** Secret-shaped strings are stripped from
   anything sent to an LLM *and* from every final document (`redact_secrets`
   via `redact_doc` — a written or pasted handoff is egress too); default on,
-  `--no-redact` opts out (CLI only; hook and MCP always redact).
+  `--no-redact` opts out (CLI only; hook and MCP always redact, and the
+  config file may never set `no_redact`).
+- **Hooks are inert by design.** They swallow every error, never call an
+  LLM, and never create files on their own — a hook must never break the
+  host session or bill the user silently.
 - **Never truncate instructions.** Size caps may trim transcripts and
   chunk notes, never the prompt rules or the user's `--focus`.
 - **Cache is best-effort and content-addressed.** A cache failure must
   never fail the run; bump `CACHE_VERSION` whenever `CHUNK_PROMPT`
-  changes. `--focus` goes only into the reduce pass so cached chunk
-  notes stay reusable.
+  changes (brief note prompts self-invalidate — the prompt text is part of
+  the hash). `--focus` goes only into the reduce pass so cached notes stay
+  reusable.
 - **Chunk calls are sequential for `SERIAL_PROVIDERS`** (claude-cli,
   ollama) — parallel `claude -p` subprocesses conflict and local Ollama
   boxes choke. API providers fan out via ThreadPoolExecutor; keep the
   serial/parallel split.
-
-## Commands
-
-```bash
-python3 -m unittest discover -s tests -v      # run tests
-python3 -m claude_handoff tests/fixtures/classic_session.jsonl -o -   # smoke run
-python3 scripts/build_single.py --check       # single-file build is fresh
-uvx ruff check claude_handoff scripts tests   # lint (config in pyproject)
-pip install -e . && claude-handoff --version  # packaging check
-```
 
 ## Architecture map (claude_handoff/ package)
 
@@ -85,26 +105,72 @@ Import direction flows strictly downward (no cycles): `textutil` →
 - Rendering (`render.py`): `render_header`, `render_activity`, `render_transcript`,
   `render_footer`, `build_deterministic`
 - Project memory (`brief.py`): `build_brief_deterministic` (timeline +
-  activity rollup), `build_brief_llm` (per-session notes, cached by
-  prompt+content hash, then one reduce — `SESSION_NOTE_PROMPT` /
-  `BRIEF_PROMPT`), `brief_path` (~/.claude/briefs). Hook side lives in
-  integrations.py: `install_brief_hook` / `run_brief_hook_mode`
-  (SessionStart, plain stdout becomes context; matcher
-  startup|resume|clear|compact).
+  activity rollup, capped at `TIMELINE_CAP`), `build_brief_llm`
+  (per-session notes, cached by prompt+content hash, then one reduce —
+  `SESSION_NOTE_PROMPT` / `BRIEF_PROMPT`), `brief_path` (~/.claude/briefs),
+  freshness stamps (`make_stamp`/`parse_stamp`), `update_brief_skeleton`
+  (SessionEnd refresh — existing stamped briefs only). Hook side lives in
+  integrations.py: `install_brief_hook` (installs BOTH SessionStart inject
+  + SessionEnd update), `run_brief_hook_mode` (plain stdout becomes
+  context; matcher startup|resume|clear|compact; staleness warning skips
+  the just-started session), `run_brief_update_mode`.
 - LLM mode (`llm.py`): `PROVIDERS` registry (env keys + default model + call
-  strategy per provider), `provider_key`, `_call_claude`, `_call_openai`,
-  `_call_gemini`, `_call_claude_cli`, `http_json`, `llm_summarize`,
-  `build_llm`, `SUMMARY_PROMPT`
+  strategy per provider), `provider_key`, `_resolve_provider`,
+  `_call_claude`, `_call_openai`, `_call_gemini`, `_call_claude_cli`,
+  `http_json`, `llm_summarize`, `build_llm`, `SUMMARY_PROMPT`
 - CLI (`cli.py`): `_HelpfulParser` (the one allowed class — argparse's designed
   extension point, so usage errors point to --help/--list),
   `build_arg_parser`, `resolve_source` (path → grep → name match → newest),
   `redact_doc`/`anonymize_text` (output redaction & --anonymize),
   `_parse_budget`/`_fit_transcript_cap` (--fit token budgets),
   `_load_config` (config defaults; no_redact is deliberately not
-  configurable), `build_document`, `write_output`, `main`
+  configurable), `_run_brief`, `build_document`, `write_output`, `main`
 
-**Adding an LLM provider** = one `_call_*` function + one `PROVIDERS`
+## Workflows — follow these checklists
+
+**Any code change**
+
+1. Test first (red), then the minimal code (green) — the suite is the
+   only proof this project accepts.
+2. `python3 -m unittest discover -s tests` — all green, no new warnings.
+3. `uvx ruff check claude_handoff scripts tests` — clean.
+4. `python3 scripts/build_single.py` (rebuild) and `--check` (verify).
+5. Behavior changed? Update `README.md` (flag table + relevant section),
+   `docs/DEVELOPMENT.md` §3 (a decision row with the why), `CHANGELOG.md`.
+
+**Changing the parser**
+
+1. Add or extend a fixture in `tests/fixtures/` reproducing the new record
+   shape (redact real content) — fixtures first, always.
+2. Run the suite and a smoke run against a real session if available.
+3. Update the schema notes in `docs/DEVELOPMENT.md` §2.
+
+**Adding an LLM provider** — one `_call_*` function + one `PROVIDERS`
 entry. Do not add if/elif provider chains anywhere (open/closed).
+
+**Adding an input format** — only against a real, redacted export
+committed as a fixture. Never guess a schema (this is why Gemini Takeout
+is still on the roadmap).
+
+**Refactoring** — prove it changed nothing: full suite green PLUS
+byte-identical outputs on the fixtures and a real session, before/after
+(the v0.2.0 and v0.11.0 passes both shipped with this proof).
+
+**Release**
+
+1. Bump the version in ALL FOUR places: `claude_handoff/_version.py`,
+   `pyproject.toml`, `server.json` (two fields), plus a `CHANGELOG.md`
+   entry.
+2. Suite + ruff + `build_single.py --check` + packaging check, all green;
+   commit and push (CI must pass).
+3. Tag `vX.Y.Z` on that commit, push the tag, `gh release create` with the
+   CHANGELOG section as notes — publishing the GitHub release triggers
+   PyPI trusted publishing automatically.
+4. Verify: `pip install claude-handoff==X.Y.Z` in a clean venv.
+5. Homebrew: bump `Formula/claude-handoff.rb` in `Vasilispapg/homebrew-tap`
+   (new sdist URL + sha256 from PyPI), then `brew fetch --force` to verify.
+6. MCP registry: `mcp-publisher publish` from the repo root (user-approved
+   GitHub device flow; description ≤ 100 chars).
 
 ## Gotchas that will bite you
 
@@ -127,19 +193,21 @@ entry. Do not add if/elif provider chains anywhere (open/closed).
   `CLAUDE_CODE_OAUTH_TOKEN`) before spawning `claude -p`, so nested runs
   from inside a Claude Code session authenticate like a fresh CLI. Don't
   remove the scrub.
-
-## When changing the parser
-
-1. Add or extend a fixture in `tests/fixtures/` reproducing the new record
-   shape (redact real content).
-2. Run the test suite and a smoke run against a real session if available.
-3. Update the schema notes in `docs/DEVELOPMENT.md` §2.
+- Tests patch names **in the module that uses them** (e.g.
+  `ch.discovery.find_sessions` vs `ch.cli.find_sessions`) — intra-package
+  imports are `from .module import name`, so patching the package root
+  does nothing. The test suite pins this convention.
+- The single-file stitcher strips module docstrings and import headers;
+  keep intra-package imports in `from .module import name` form (never
+  `module.name` calls) or the generated build breaks.
+- `--fit` conflicts with explicit `--llm`/`--max-chars` by design, and the
+  config file can inject `fit` — error messages mention that on purpose.
 
 ## Style
 
 Small pure functions, type hints, no classes unless state truly demands it.
-Keep the file readable top-to-bottom: discovery → parsing → rendering →
-LLM → CLI.
+Keep each module readable top-to-bottom and the package readable in import
+order: discovery → parsing → rendering → LLM → brief → integrations → CLI.
 
 SOLID, applied the Python way: single-responsibility functions (one record
 type / one concern each); open/closed via the `PROVIDERS` registry —

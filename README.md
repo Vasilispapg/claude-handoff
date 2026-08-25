@@ -8,102 +8,164 @@
 [![Downloads](https://img.shields.io/pypi/dm/claude-handoff)](https://pypi.org/project/claude-handoff/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Summarize & export a Claude Code session into one clean `handoff.md` you can paste into Gemini, GPT, or another Claude — without the noise.**
+**Turn any Claude Code session — even a crashed one — into a clean `handoff.md` another AI can continue from. And give Claude Code permanent project memory, distilled from your own history.**
 
-Claude Code stores every session locally as JSONL (`~/.claude/projects/…/*.jsonl`), full of tool calls, tool results, thinking blocks and system reminders. Existing exporters dump all of that into markdown. `claude-handoff` instead produces a **handoff document**: the actual conversation, what files were touched, what commands ran, and (optionally) an LLM-written summary of goal / decisions / current state / next steps — so the next model can just continue the work.
+```bash
+chf
+```
 
-- **Zero dependencies.** Stdlib only, Python 3.9+. A nine-module package — also shipped as a generated single-file script you can `curl` and audit.
+That's it. Your latest session becomes `handoff.md`: the conversation without
+the noise, the files that changed, the commands that ran — opening with
+instructions to the receiving assistant, so you can paste it straight into
+Gemini, GPT, claude.ai, or a fresh Claude Code session with zero extra
+prompting.
+
+Claude Code stores every session locally as JSONL
+(`~/.claude/projects/…/*.jsonl`), full of tool calls, tool results, thinking
+blocks and system reminders. Existing exporters dump all of that into
+markdown. `claude-handoff` instead produces a **handoff document** — and,
+since it can read your *entire* history, a **project memory brief** too.
+
+- **Zero dependencies.** Stdlib only, Python 3.9+. A nine-module package —
+  also shipped as a generated single-file script you can `curl` and audit.
 - **Deterministic by default.** No API call, no cost, works offline.
-- **`--llm` when you want a real summary.** Claude, OpenAI or Gemini via your own API key — or `--llm claude-cli`, which runs your locally-installed Claude Code CLI on your existing Pro/Max plan: **no API key at all**.
-- **Noise-free.** Drops tool results, thinking blocks, system reminders, subagent chatter, slash-command envelopes. Keeps user intent, assistant answers, files modified, commands run — including the files and commands of subagents (`agent-*.jsonl`), whose full transcripts stay behind `--include-sidechains`.
-- **Project memory.** `chf --brief` distills a project's ENTIRE session history into one living brief (decisions, fixes, conventions, open threads — with session citations); `--install-brief-hook` injects it into every new Claude Code session, so Claude starts already knowing the project.
-- **Safe to paste.** Secret-looking strings (API keys, tokens, `password=`…) are redacted from every output — the handoff you paste into a web chat is egress too. `--no-redact` opts out.
+- **`--llm` when you want a real summary.** Claude, OpenAI or Gemini via
+  your own API key — or `--llm claude-cli`, which runs your locally-installed
+  Claude Code CLI on your existing Pro/Max plan: **no API key at all**.
+- **Noise-free.** Drops tool results, thinking blocks, system reminders,
+  subagent chatter, slash-command envelopes. Keeps user intent, assistant
+  answers, files modified, commands run — including the files and commands
+  of subagents (`agent-*.jsonl`), whose full transcripts stay behind
+  `--include-sidechains`.
+- **Project memory.** `chf --brief` distills a project's ENTIRE session
+  history into one living brief (decisions, fixes, conventions, open
+  threads — with session citations); `--install-brief-hook` injects it into
+  every new Claude Code session, so Claude starts already knowing the
+  project.
+- **Safe to paste.** Secret-looking strings (API keys, tokens,
+  `password=`…) are redacted from every output — the handoff you paste into
+  a web chat is egress too. `--anonymize` goes further for public sharing.
+
+---
+
+## Prerequisites
+
+| Requirement | Minimum | Check | Notes |
+|---|---|---|---|
+| Python | 3.9+ | `python3 --version` | The only hard requirement |
+| Claude Code | any | `claude --version` | Only for `--llm claude-cli` (uses your Pro/Max login) |
+| pipx *(recommended)* | any | `pipx --version` | `pip install pipx` — or use brew / plain pip |
+
+No third-party Python packages, ever — everything runs on the standard library.
 
 ## Install
 
 ```bash
 pipx install claude-handoff        # or: pip install claude-handoff
+```
+
+```bash
 brew install Vasilispapg/tap/claude-handoff   # Homebrew
+```
+
+```bash
 # or just grab the generated single-file build — stdlib-only, auditable:
 curl -O https://raw.githubusercontent.com/Vasilispapg/claude-handoff/main/single/claude_handoff.py
 python3 claude_handoff.py --list
-
-# tab completion (bash or zsh):
-eval "$(claude-handoff --completions zsh)"
 ```
 
-Installing the package gives you two commands: `claude-handoff` and its
-short alias `chf` — identical, use whichever you like typing.
-
-## Usage
+Installing the package gives you two identical commands: `claude-handoff`
+and the short alias **`chf`**. Tab completion:
 
 ```bash
-claude-handoff                     # latest session → handoff.md
-claude-handoff -i                  # pick from a numbered list
-claude-handoff --list              # what sessions do I have? (title · first prompt)
-claude-handoff --name "login bug"  # newest session whose title/prompt matches
-claude-handoff "login bug"         # same — a non-path argument is a name search
-claude-handoff --grep "CORS"       # newest session that *talked about* CORS
-claude-handoff --fit 32k           # handoff sized to fit a 32k-token context
-claude-handoff --project myrepo    # latest session of a specific project
-claude-handoff path/to/session.jsonl -o -     # explicit file → stdout
-claude-handoff -o clipboard        # straight to the clipboard — go paste it
-claude-handoff --last 5            # only the last 5 user turns
-claude-handoff --since 2h          # only the last 2 hours of the session
-claude-handoff --include-tools     # keep collapsed per-tool-call detail
-claude-handoff --include-sidechains  # append full subagent transcripts
-chf --last 5                       # `chf` = short alias, same tool
-
-# claude.ai AND ChatGPT web chats too (each app's data export):
-claude-handoff conversations.json --list
-claude-handoff conversations.json --name "webhook bug"
-
-# whole project in one handoff, oldest → newest:
-claude-handoff --project myrepo --merge
-
-# machine-readable:
-claude-handoff --format json -o session.json
-claude-handoff --list --format json   # session list as JSON
-
-# shareable in public (issues, forums): ~ paths, no emails/IPs/username
-claude-handoff --anonymize
-
-# auto-handoff: write one for every session when it ends
-claude-handoff --install-hook
-
-# project memory: distill ALL sessions into one brief, inject at start
-chf --brief --llm claude-cli       # build/refresh ~/.claude/briefs/<project>.md
-chf --install-brief-hook           # every new session starts with it
-
-# real LLM summary (goal / decisions / current state / next steps):
-claude-handoff --llm claude-cli                 # uses your Claude Code login — no API key
-claude-handoff --llm ollama                     # local model — fully offline
-export ANTHROPIC_API_KEY=sk-...
-claude-handoff --llm claude
-claude-handoff --llm openai --model gpt-4o
-claude-handoff --llm gemini --with-transcript   # summary + cleaned transcript
+eval "$(claude-handoff --completions zsh)"    # bash works too
 ```
 
-Then paste `handoff.md` into any other model. The document opens with instructions to the receiving assistant, so no extra prompting is needed.
+---
+
+## 60 seconds: pick your situation
+
+**A session crashed, hit the usage limit, or you closed the terminal:**
+
+```bash
+chf -o clipboard
+```
+
+…then paste into claude.ai, ChatGPT, Gemini — or a fresh `claude` session.
+Works on any old session; nothing needed to be installed *before* the crash.
+
+**Moving work from Claude Code to another model:**
+
+```bash
+chf --fit 32k -o clipboard         # sized to the receiver's context window
+```
+
+**"Which session was it where we talked about CORS?"**
+
+```bash
+chf --list --grep "CORS"           # every match, with a 🔍 context preview
+chf --grep "CORS"                  # or export the newest match directly
+```
+
+**Give Claude Code permanent memory of this project:**
+
+```bash
+chf --brief --llm claude-cli       # distill ALL sessions → one cited brief
+chf --install-brief-hook           # every new session starts knowing it
+```
+
+**A real summary instead of the transcript (goal / decisions / state / next):**
+
+```bash
+chf --llm claude-cli               # your Claude Code login — no API key
+```
+
+**A claude.ai or ChatGPT web chat instead of a terminal session:**
+
+```bash
+chf conversations.json --list      # each app's data export works as input
+chf conversations.json --name "webhook bug"
+```
+
+---
 
 ## Project memory (`--brief`)
 
-Claude Code forgets everything between sessions — but the whole history
-is on your disk. `chf --brief` reads **every** session of the current
-project and writes one memory document: a factual session timeline +
-most-touched files (deterministic, free), and with `--llm` a distilled
-memory — decisions with their why, fixed bugs, conventions, open
-threads — every bullet cited with the session id it came from.
-Per-session notes are cached, so refreshing after new sessions only
-pays for the new ones. `chf --install-brief-hook` installs two hooks:
-SessionStart injects the brief as context (Claude starts already
-knowing your project), SessionEnd auto-refreshes the factual part —
-free, no LLM ever runs from a hook. The distilled part refreshes only
-when you say so; the brief carries a freshness stamp, and both the
-file and the injection warn when newer sessions exist. Fully local;
-redaction applies as everywhere.
+Claude Code forgets everything between sessions — but the whole history is
+on your disk. `chf --brief` reads **every** session of the current project
+and writes one memory document to `~/.claude/briefs/<project>.md`:
 
-> Auto-selection skips nearly-empty sessions (like the stub `claude /login` leaves behind) so "latest" means your latest *real* conversation. An explicit path or `--name` always wins.
+- a factual **session timeline** + most-touched files (deterministic, free);
+- with `--llm`, a **distilled memory** — decisions with their why, fixed
+  bugs, conventions, open threads — every bullet cited with the session id
+  it came from (`chf --name <id>` opens the source).
+
+Per-session notes are cached, so refreshing after new sessions only pays
+for the new ones.
+
+```bash
+chf --install-brief-hook
+```
+
+installs two hooks: **SessionStart** injects the brief as context (Claude
+starts already knowing your project — re-injected after `/compact` too),
+**SessionEnd** auto-refreshes the factual part for free. **No LLM ever runs
+from a hook**; the distilled part refreshes only when you say so. The brief
+carries a freshness stamp, and both the file and the injection warn when
+newer sessions exist. Fully local; redaction applies as everywhere.
+
+## Make it automatic
+
+```bash
+chf --install-hook                 # SessionEnd → handoff to ~/.claude/handoffs/
+chf --install-brief-hook           # SessionStart/End → project memory (above)
+```
+
+Both edit `~/.claude/settings.json` non-destructively, are idempotent, and
+have matching `--uninstall-*` flags. Hook failures never break the host
+session, and hooks never trigger LLM calls or create files on their own.
+
+---
 
 ## What the output looks like
 
@@ -132,60 +194,78 @@ the login breaks on unicode passwords…
 Found it — ascii encoding. Changed to utf-8, tests pass.
 ```
 
-## Flags
+## Common commands
 
-| Flag | Meaning |
-|---|---|
-| `--list` | list sessions (date, size, project, title · first prompt); with a `conversations.json`, list its chats |
-| `--name QUERY` | pick newest session (or web conversation) whose title/first prompt contains QUERY |
-| `--project NAME` | pick latest session whose project path contains NAME |
-| `--last N` / `--since 2h` | keep only the tail of the conversation (N user turns / a time window) |
-| `--merge` | merge every session in scope into ONE handoff (session-break markers, summed activity) |
-| `--format md\|json` | markdown (default) or machine-readable JSON — also applies to `--list` |
-| `-o clipboard` | copy the handoff straight to the clipboard |
-| `--include-sidechains` | append full subagent transcripts (inline sidechains and `<session-id>/subagents/agent-*.jsonl`); their file/command activity is always counted |
-| `-i` / `--interactive` | pick session(s) from a numbered list — `1,3` or `2-4` merges several into one handoff |
-| `--brief` | distill the project's whole history into `~/.claude/briefs/<project>.md` (deterministic; `--llm` for real distillation) |
-| `--install-brief-hook` / `--uninstall-brief-hook` | inject the brief as context into every new session (SessionStart hook) |
-| `--install-hook` / `--uninstall-hook` | auto-write a handoff to `~/.claude/handoffs/` when each session ends |
-| `--completions bash\|zsh` | print a tab-completion snippet |
-| `--mcp` | run as an MCP server over stdio |
-| `--allow-llm` | with `--mcp`: let the `handoff` tool run LLM summaries (explicit opt-in) |
-| `-o FILE` / `-o -` | output file / stdout (default `handoff.md`) |
-| `--include-tools` | collapsed `<details>` blocks with each tool call |
-| `--max-chars N` | cap the transcript section (default 80 000; keeps start + recent end) |
-| `--any` | ignore the current directory; consider every project's sessions |
-| `--llm claude\|openai\|gemini\|claude-cli` | LLM summary instead of raw cleaned transcript |
-| `--model ID` | override the LLM model |
-| `--focus TEXT` | extra instructions for the summary (e.g. `--focus "emphasize the API decisions"`) |
-| `--with-transcript` | with `--llm`, also append the cleaned transcript |
-| `--grep TEXT` | pick newest session whose *conversation* contains TEXT; with `--list`/`-i` shows every match with a 🔍 preview |
-| `--fit TOKENS` | size the deterministic handoff to a token budget (`32k`, `128k`, `1m`) by tightening transcript truncation |
-| `--anonymize` | strip identity for public sharing: home paths → `~`, emails/IPs/username → placeholders |
-| `--no-redact` | keep secret-looking strings (default: redacted from every output, LLM or not) |
-| `--no-cache` | disable the chunk-note cache (`~/.cache/claude-handoff`) |
+```bash
+chf                                # latest session → handoff.md
+chf -i                             # numbered picker; "1,3" or "2-4" merges several
+chf --list                         # what sessions do I have? (title · first prompt)
+chf --list --format json           # the same, machine-readable
+chf --name "login bug"             # newest session whose title/prompt matches
+chf "login bug"                    # same — a non-path argument is a name search
+chf --grep "CORS"                  # newest session that *talked about* CORS
+chf --project myrepo               # latest session of a specific project
+chf path/to/session.jsonl -o -     # explicit file → stdout
+chf -o clipboard                   # straight to the clipboard — go paste it
+chf --last 5                       # only the last 5 user turns
+chf --since 2h                     # only the last 2 hours of the session
+chf --fit 32k                      # sized to fit a 32k-token context
+chf --include-tools                # keep collapsed per-tool-call detail
+chf --include-sidechains           # append full subagent transcripts
+chf --anonymize                    # public-safe: ~ paths, no emails/IPs/username
+chf --project myrepo --merge       # whole project in ONE handoff, oldest → newest
+chf --format json -o session.json  # machine-readable handoff
 
-**API keys** (first set variable wins per provider):
+# LLM summaries (goal / decisions / current state / next steps):
+chf --llm claude-cli               # your Claude Code login — no API key
+chf --llm ollama                   # local model — fully offline
+chf --llm claude                   # Anthropic API   (ANTHROPIC_API_KEY)
+chf --llm openai --model gpt-4o    # OpenAI API      (OPENAI_API_KEY)
+chf --llm gemini --with-transcript # Google API      (GEMINI_API_KEY)
+chf --llm claude-cli --focus "emphasize the API decisions"
 
-| Provider | Env vars | Notes |
-|---|---|---|
-| `claude` | `ANTHROPIC_API_KEY` or `CLAUDE_API` | Anthropic API |
-| `openai` | `OPENAI_API_KEY` or `GPT_API` | OpenAI API |
-| `gemini` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` or `GEMINI_API` | Google AI API |
-| `claude-cli` | *(none)* | Shells out to your installed [Claude Code](https://claude.ai/code) CLI; billed to your Pro/Max plan. Run `claude` once to log in. |
-| `ollama` | *(none — local)* | Local [Ollama](https://ollama.com) server: fully offline, nothing leaves your machine. `OLLAMA_MODEL` / `OLLAMA_BASE_URL` to configure. |
+# project memory:
+chf --brief                        # free factual brief (timeline + files)
+chf --brief --llm claude-cli       # + distilled decisions/fixes/conventions
+```
 
-Nothing is sent anywhere unless you pass `--llm`.
+**Where does it look?** Sessions live in Claude Code's global store
+(`~/.claude/projects`), so you can run `chf` from anywhere. If your current
+directory *is* a project (or a subfolder of one), it scopes to that
+project's sessions; a parent "master folder" scopes to every project under
+it; `--any` ignores the directory entirely. Auto-selection skips
+nearly-empty sessions (like the stub `claude /login` leaves behind) so
+"latest" means your latest *real* conversation — an explicit path, `--name`
+or `-i` always wins.
 
-**Where does it look?** Sessions live in Claude Code's global store (`~/.claude/projects`), so you can run `claude-handoff` from anywhere. If your current directory *is* a project (or a subfolder of one), it scopes to that project's sessions; a parent "master folder" scopes to every project under it; `--any` ignores the directory entirely.
-
-**Big sessions & privacy.** Transcripts beyond one pass (~400k chars) are summarized map-reduce style: notes per chunk, then one synthesis — nothing is silently dropped, and finished chunks are cached in `~/.cache/claude-handoff` so an interrupted run resumes for free. Secret-looking strings (API keys, tokens, `password=`…) are redacted from every output — what goes to an LLM *and* the handoff document itself. In a terminal you get a live progress bar with elapsed time and an ETA:
+**Big sessions.** Transcripts beyond one pass (~400k chars) are summarized
+map-reduce style: notes per chunk, then one synthesis — nothing is silently
+dropped, and finished chunks are cached in `~/.cache/claude-handoff` so an
+interrupted run resumes for free. Chunks run 4-way parallel on API
+providers; `claude-cli` and `ollama` stay sequential by design. In a
+terminal you get a live progress bar:
 
 ```text
 [█████████░░░░░░░░░░░░░░░] 3/9 chunks | 4m12s elapsed | ~8m left | summarizing part 4/8 (199,867 chars)…
 ```
 
-Sessions with API `usage` data also get a **Tokens** line in the header (input incl. cache / output). Map-reduce chunks run **4-way parallel** on API providers (`claude`/`openai`/`gemini`); `claude-cli` and `ollama` stay sequential by design.
+Sessions with API `usage` data also get a **Tokens** line in the header,
+and every run reports the output's ≈token size.
+
+## Privacy & zero-trust
+
+- **Nothing is sent anywhere unless you pass `--llm`** — deterministic mode
+  is fully offline.
+- **Redaction is on for every output**, not just LLM traffic: secret-shaped
+  strings (API keys, tokens, JWTs, `password=`…) are stripped from the
+  handoff itself, hook files, and MCP replies — a pasted document is egress
+  too. `--no-redact` opts out per run (and is deliberately *not* allowed in
+  the config file).
+- **`--anonymize`** additionally collapses your home directory to `~` and
+  replaces emails, IPv4s and your username with placeholders — for pasting
+  into public issues and forums.
+- `--llm claude-cli` and `--llm ollama` keep everything inside accounts and
+  machines you already control.
 
 ## Config (optional)
 
@@ -197,10 +277,26 @@ Put defaults you always use in `~/.config/claude-handoff/config.json`
 ```
 
 Allowed keys: `llm`, `model`, `fit`, `output`, `include_tools`,
-`include_sidechains`, `max_chars`, `anonymize`, `focus`. Security
-switches (`no_redact`) are deliberately **not** configurable — weakening
-redaction must be an explicit per-run choice. A broken config warns and
-is ignored, never fatal.
+`include_sidechains`, `max_chars`, `anonymize`, `focus`. Security switches
+(`no_redact`) are deliberately **not** configurable — weakening redaction
+must be an explicit per-run choice. A broken config warns and is ignored,
+never fatal.
+
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY` / `CLAUDE_API` | key for `--llm claude` (first set wins) |
+| `OPENAI_API_KEY` / `GPT_API` | key for `--llm openai` |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` / `GEMINI_API` | key for `--llm gemini` |
+| `OLLAMA_MODEL` / `OLLAMA_BASE_URL` | local Ollama model and endpoint |
+| `CLAUDE_HOME` | Claude Code home (default `~/.claude`) — where sessions, handoffs and briefs live |
+| `CLAUDE_HANDOFF_CACHE` | chunk/note cache dir (default `~/.cache/claude-handoff`) |
+| `CLAUDE_HANDOFF_CONFIG` | config file path (default `~/.config/claude-handoff/config.json`) |
+
+`claude-cli` needs no variable — it shells out to your installed
+[Claude Code](https://claude.ai/code) CLI, billed to your Pro/Max plan
+(run `claude` once to log in).
 
 ## MCP server
 
@@ -215,11 +311,81 @@ document for a session by name/project/path; pass `anonymize` for a
 shareable version). Deterministic by default — an MCP client can only
 trigger LLM summaries when you start the server with `--allow-llm`.
 
+## Troubleshooting
+
+**`claude-handoff: command not found` after `pip install`**
+pip puts scripts in a user bin dir that may not be on PATH. Use
+`pipx install claude-handoff` or brew — both manage PATH — or add
+`~/.local/bin` (Linux) / `~/Library/Python/3.x/bin` (macOS) to your PATH.
+
+**"No sessions found under ~/.claude/projects"**
+You're on a machine (or user) that hasn't run Claude Code, or your store
+lives elsewhere — point `CLAUDE_HOME` at it. Inside a project folder the
+tool scopes to that project; pass `--any` to search everything.
+
+**It picked the wrong session**
+"Latest" skips nearly-empty stubs but is still just the newest file. Use
+`-i` (picker), `--name "part of the title"`, or `--grep "something said"`.
+
+**`--llm claude-cli` fails or asks to authenticate**
+Run `claude` once and log in (`/login`). It works even when invoked from
+*inside* a Claude Code session — inherited `CLAUDE*` env vars are scrubbed
+so the nested CLI authenticates like a fresh one.
+
+**"Set ANTHROPIC_API_KEY … to use --llm claude"**
+API providers need a key in the environment — see the table above. No key
+at all? Use `--llm claude-cli` (subscription) or `--llm ollama` (local).
+
+**`--fit` refuses to combine with `--llm` / `--max-chars`**
+`--fit` sizes the deterministic output on its own. If you didn't type it,
+your config file probably sets `fit` — override with an explicit
+`--max-chars` removed, or drop the key.
+
+**The brief injection warns "sessions newer than this brief exist"**
+That's the freshness stamp doing its job: run
+`chf --brief --llm claude-cli` to re-distill (cached — only new sessions
+are paid for). The factual part refreshes itself if the SessionEnd hook is
+installed.
+
+**Garbled characters on Windows**
+Set `PYTHONUTF8=1` (the CI runs the whole suite that way).
+
+## Full flag reference
+
+| Flag | Meaning |
+|---|---|
+| `--list` | list sessions (date, size, project, title · first prompt); with a `conversations.json`, list its chats |
+| `--name QUERY` | pick newest session (or web conversation) whose title/first prompt contains QUERY |
+| `--grep TEXT` | pick newest session whose *conversation* contains TEXT; with `--list`/`-i` shows every match with a 🔍 preview |
+| `--project NAME` | pick latest session whose project path contains NAME |
+| `-i` / `--interactive` | pick session(s) from a numbered list — `1,3` or `2-4` merges several into one handoff |
+| `--any` | ignore the current directory; consider every project's sessions |
+| `--last N` / `--since 2h` | keep only the tail of the conversation (N user turns / a time window) |
+| `--merge` | merge every session in scope into ONE handoff (session-break markers, summed activity) |
+| `--brief` | distill the project's whole history into `~/.claude/briefs/<project>.md` (deterministic; `--llm` for real distillation) |
+| `--install-brief-hook` / `--uninstall-brief-hook` | project memory hooks: inject the brief at SessionStart, auto-refresh facts at SessionEnd |
+| `--install-hook` / `--uninstall-hook` | auto-write a handoff to `~/.claude/handoffs/` when each session ends |
+| `--format md\|json` | markdown (default) or machine-readable JSON — also applies to `--list` |
+| `-o FILE` / `-o -` / `-o clipboard` | output file / stdout / clipboard (default `handoff.md`) |
+| `--fit TOKENS` | size the deterministic handoff to a token budget (`32k`, `128k`, `1m`) by tightening transcript truncation |
+| `--max-chars N` | cap the transcript section (default 80 000; keeps start + recent end) |
+| `--include-tools` | collapsed `<details>` blocks with each tool call |
+| `--include-sidechains` | append full subagent transcripts (inline sidechains and `<session-id>/subagents/agent-*.jsonl`); their file/command activity is always counted |
+| `--llm claude\|openai\|gemini\|claude-cli\|ollama` | LLM summary instead of raw cleaned transcript |
+| `--model ID` | override the LLM model |
+| `--focus TEXT` | extra instructions for the summary (e.g. `--focus "emphasize the API decisions"`) |
+| `--with-transcript` | with `--llm`, also append the cleaned transcript |
+| `--anonymize` | strip identity for public sharing: home paths → `~`, emails/IPs/username → placeholders |
+| `--no-redact` | keep secret-looking strings (default: redacted from every output, LLM or not) |
+| `--no-cache` | disable the chunk-note cache (`~/.cache/claude-handoff`) |
+| `--mcp` | run as an MCP server over stdio |
+| `--allow-llm` | with `--mcp`: let the `handoff` tool run LLM summaries (explicit opt-in) |
+| `--completions bash\|zsh` | print a tab-completion snippet |
+
 ## Roadmap
 
 - Gemini exports as input (Google Takeout ships HTML only — bring a real, redacted export to build against)
 - Session chains: auto-detect `/compact`-continued sessions and offer to merge the lineage (`--follow`)
-- Opt-in LLM summaries over MCP (`--mcp --allow-llm`)
 
 PRs welcome.
 
@@ -232,11 +398,28 @@ This space isn't empty — it's fragmented. Pick the tool that matches your situ
 - **In-session handoff skills/plugins** — [thepushkarp/handoff](https://github.com/thepushkarp/handoff), [claude-session-handoff](https://github.com/thenguyenvn90/claude-session-handoff), [claude-code-handoff](https://github.com/Sonovore/claude-code-handoff) — great *if* you remember to run them before the session ends; the model writes the summary using your session's context, and the output targets the next *Claude* session.
 - **Browser extensions** — Handoff, LLM Context Bridge, ContextSwitch — transfer *web* chats between ChatGPT/Claude/Gemini; they can't see Claude Code sessions.
 
-`claude-handoff` is the post-hoc, paste-anywhere corner of this map: it works on the JSONL *after* the fact — old sessions, crashed sessions, sessions that hit the usage limit — needs nothing installed in advance, costs zero tokens by default, can write a real summary when you ask for one (`--llm`), and produces a document any receiving model can pick up, including claude.ai, ChatGPT and Gemini in the browser or on your phone.
+`claude-handoff` is the post-hoc, paste-anywhere corner of this map: it works on the JSONL *after* the fact — old sessions, crashed sessions, sessions that hit the usage limit — needs nothing installed in advance, costs zero tokens by default, can write a real summary when you ask for one (`--llm`), and produces a document any receiving model can pick up, including claude.ai, ChatGPT and Gemini in the browser or on your phone. And with `--brief`, it's the only one that turns that history into standing project memory.
 
-## Docs
+## Development
 
-[INDEX.md](INDEX.md) — file map · [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — architecture, JSONL schema notes, design decisions · [AGENTS.md](AGENTS.md) — instructions for AI coding agents · [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md)
+```bash
+git clone https://github.com/Vasilispapg/claude-handoff && cd claude-handoff
+python3 -m unittest discover -s tests -v      # the whole suite (no deps needed)
+python3 -m claude_handoff tests/fixtures/agent_session.jsonl -o -   # smoke run
+python3 scripts/build_single.py --check       # single-file build is fresh
+uvx ruff check claude_handoff scripts tests   # lint (config in pyproject)
+```
+
+Runtime code lives in the `claude_handoff/` package; `single/claude_handoff.py`
+is **generated** — rebuild it with `python3 scripts/build_single.py` after
+any package change (CI fails when it's stale). New parser behavior starts
+with a redacted fixture in `tests/fixtures/` — see
+[CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) (instructions
+and invariants for both human and AI contributors).
+
+## Learn more
+
+[INDEX.md](INDEX.md) — file map · [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — architecture, JSONL schema notes, design decisions · [AGENTS.md](AGENTS.md) — contributor guide for AI coding agents · [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md)
 
 ## License
 

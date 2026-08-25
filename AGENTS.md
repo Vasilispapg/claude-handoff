@@ -59,7 +59,8 @@ pip install -e . && claude-handoff --version  # packaging check
 - Hook: `install_hook` / `run_hook_mode` (`--install-hook`,
   `--hook-stdin`) — hook mode swallows all errors by design: a hook must
   never break the host Claude Code session. Sidechains:
-  `_handle_sidechain_record`, `render_sidechains`.
+  `_handle_sidechain_record` (inline records), `_parse_agent_files`
+  (separate agent-*.jsonl transcripts), `render_sidechains`.
 - Parsing: `parse_session` (coordinator) + single-responsibility helpers
   `_handle_assistant_record`, `_handle_user_record`, `_handle_tool_use`,
   `_update_envelope_meta`; text utils `user_text`, `tool_result_text`,
@@ -84,7 +85,11 @@ entry. Do not add if/elif provider chains anywhere (open/closed).
   *tool calls* (not text blocks), and the human's answers arrive inside
   `AskUserQuestion` *tool results*. `parse_session` recovers both via the
   `tool_use_id → name` map. Don't "simplify" this away.
-- `isSidechain: true` records are subagent transcripts — dropped by design.
+- Subagent transcripts come in two shapes: inline `isSidechain: true`
+  records (older sessions) and separate `<session-id>/subagents/agent-*.jsonl`
+  files next to the session (newer Claude Code). Both are kept out of the
+  main conversation; their file/command activity always merges into the
+  activity summary, full texts render only with `--include-sidechains`.
 - `isMeta: true` user records and `<system-reminder>` / slash-command
   envelopes are not human input — filtered by `NOISE_RE` / `CAVEAT_RE`.
 - Truncation is head+tail everywhere (the middle is the expendable part);

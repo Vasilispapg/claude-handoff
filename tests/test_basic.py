@@ -13,6 +13,7 @@ import claude_handoff as ch  # noqa: E402
 
 FIXTURE = ROOT / "tests" / "fixtures" / "classic_session.jsonl"
 TRIVIAL = ROOT / "tests" / "fixtures" / "trivial_session.jsonl"
+AGENT_SESSION = ROOT / "tests" / "fixtures" / "agent_session.jsonl"
 
 
 class ParseTests(unittest.TestCase):
@@ -160,6 +161,54 @@ class DiscoveryTests(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             args = ch.build_arg_parser().parse_args([])
             self.assertEqual(ch.resolve_source(args), TRIVIAL)
+
+
+class AgentSessionTests(unittest.TestCase):
+    """Separate-file subagent transcripts (<session-id>/subagents/agent-*.jsonl)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.parsed = ch.parse_session(AGENT_SESSION)
+
+    def test_agent_files_become_sidechain_groups_ordered_by_time(self):
+        groups = self.parsed["sidechains"]
+        self.assertEqual(len(groups), 2)
+        # agent-bbb222 ran first: timestamp order, not filename order
+        self.assertIn("Update the docs", groups[0]["prompt"])
+        self.assertIn("encoding bug", groups[1]["prompt"])
+        self.assertEqual(groups[0]["agent_id"], "bbb222")
+        self.assertTrue(any("docs ενημερώθηκαν" in t
+                            for t in groups[0]["texts"]))
+
+    def test_agent_activity_merged_by_default(self):
+        fw = self.parsed["files_written"]
+        self.assertIn("/home/vspapg/myapp/docs/api.md", fw)
+        self.assertIn("/home/vspapg/myapp/server.py", fw)
+        self.assertTrue(any("pytest" in c for c in self.parsed["commands"]))
+        self.assertTrue(any("git diff --stat docs/" in c
+                            for c in self.parsed["commands"]))
+
+    def test_meta_counts_agents(self):
+        self.assertEqual(self.parsed["meta"]["n_agents"], 2)
+        self.assertEqual(ch.parse_session(FIXTURE)["meta"]["n_agents"], 0)
+
+    def test_agent_texts_stay_out_of_main_turns(self):
+        text = str(self.parsed["turns"])
+        self.assertNotIn("Ενημερώνω τα docs", text)       # agent chatter
+        self.assertIn("Οι δύο agents τελείωσαν", text)    # main convo intact
+
+    def test_render_marker_by_default_full_texts_with_flag(self):
+        doc = ch.build_deterministic(self.parsed, AGENT_SESSION,
+                                     include_tools=False, max_chars=80_000)
+        self.assertIn("2 subagent", doc)                  # marker line
+        self.assertIn("--include-sidechains", doc)        # discovery hint
+        self.assertNotIn("## Subagent work", doc)
+        self.assertNotIn("docs ενημερώθηκαν", doc)
+        doc2 = ch.build_deterministic(self.parsed, AGENT_SESSION,
+                                      include_tools=False, max_chars=80_000,
+                                      include_sidechains=True)
+        self.assertIn("## Subagent work", doc2)
+        self.assertIn("docs ενημερώθηκαν", doc2)
 
 
 class ProviderTests(unittest.TestCase):
@@ -386,6 +435,17 @@ class CompletionsTests(unittest.TestCase):
             for flag in ("--llm", "--merge", "--focus", "--list"):
                 self.assertIn(flag, out)
             self.assertIn("complete -W", out)
+
+    def test_completions_cover_chf_alias(self):
+        import contextlib
+        import io
+        for shell in ("bash", "zsh"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ch.print_completions(shell)
+            last = buf.getvalue().strip().splitlines()[-1]
+            self.assertIn("claude-handoff", last)
+            self.assertIn("chf", last.split())
 
 
 class McpTests(unittest.TestCase):

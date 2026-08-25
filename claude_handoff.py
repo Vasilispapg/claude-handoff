@@ -11,6 +11,7 @@ Zero dependencies. Python 3.9+. MIT license.
 
 Usage:
     claude-handoff                      # latest session -> handoff.md
+    chf                                 # same tool, shorter to type
     claude-handoff --list               # list available sessions
     claude-handoff -i                   # numbered interactive picker
     claude-handoff --name "login bug"   # newest session matching a name
@@ -50,7 +51,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -464,7 +465,7 @@ def _new_parse_state() -> dict:
             "session_id": None, "cwd": None, "git_branch": None,
             "version": None, "models": set(), "first_ts": None,
             "last_ts": None, "n_user": 0, "n_assistant": 0, "n_tools": 0,
-            "tok_in": 0, "tok_out": 0, "summaries": [],
+            "n_agents": 0, "tok_in": 0, "tok_out": 0, "summaries": [],
         },
         "turns": [],            # {"role", "text_parts", "tools", "ts"}
         "files_written": {},    # path -> edit count
@@ -619,6 +620,52 @@ def _handle_sidechain_record(rec: dict, state: dict) -> None:
             groups[-1]["texts"].append(block["text"].strip())
 
 
+def _parse_agent_files(session_path: Path, state: dict) -> None:
+    """Fold separate-file subagent transcripts into the parse state.
+
+    Newer Claude Code stores each subagent's transcript next to the session
+    as <session-id>/subagents/agent-<id>.jsonl instead of inline isSidechain
+    records. Their text becomes sidechain groups (rendered only with
+    --include-sidechains); their file/command activity always counts —
+    in multi-agent sessions that is where the actual work happens."""
+    agents_dir = session_path.parent / session_path.stem / "subagents"
+    try:
+        if not agents_dir.is_dir():
+            return
+        agent_files = sorted(agents_dir.glob("*.jsonl"))
+    except OSError:
+        return
+    groups = []
+    for fp in agent_files:
+        sub = _new_parse_state()
+        prompt = None
+        for rec in load_records(fp):
+            rtype = rec.get("type")
+            if rtype == "assistant":
+                _handle_assistant_record(rec, sub)
+            elif rtype == "user" and prompt is None:
+                # the agent's first user message is its task prompt
+                text = clean_text(user_text(rec.get("message") or {}))
+                if text:
+                    prompt = text
+            _update_envelope_meta(rec, sub["meta"])
+        texts = [part for turn in sub["turns"]
+                 if turn["role"] == "assistant" for part in turn["text_parts"]]
+        if not (prompt or texts or sub["files_written"] or sub["commands"]):
+            continue  # empty or foreign file
+        for key in ("files_written", "files_read"):
+            for f, n in sub[key].items():
+                state[key][f] = state[key].get(f, 0) + n
+        state["commands"].extend(sub["commands"])
+        state["meta"]["n_agents"] += 1
+        groups.append({"prompt": one_line(prompt, 120) if prompt else None,
+                       "texts": texts,
+                       "agent_id": fp.stem.removeprefix("agent-"),
+                       "ts": sub["meta"]["first_ts"]})
+    groups.sort(key=lambda g: (g["ts"] is None, g["ts"] or ""))
+    state["sidechains"].extend(groups)
+
+
 def parse_session(path: Path) -> dict:
     """Parse a session JSONL into turns + metadata + activity stats."""
     state = _new_parse_state()
@@ -637,6 +684,7 @@ def parse_session(path: Path) -> dict:
                 _handle_user_record(rec, state)
         # unknown record types (queue-operation, attachment, …) are skipped
 
+    _parse_agent_files(path, state)
     # drop empty turns (e.g. assistant records that carried only thinking)
     state["turns"] = [t for t in state["turns"]
                       if t["text_parts"] or t["tools"]]
@@ -766,6 +814,10 @@ def render_activity(parsed: dict, max_commands: int = 30) -> str:
         out += ["## Files read", ""]
         out += [f"- `{f}`" for f in sorted(fr)][:20]
         out.append("")
+    n_agents = parsed["meta"].get("n_agents", 0)
+    if n_agents:
+        out += [f"_🤖 {n_agents} subagent(s) contributed to the work above "
+                f"(--include-sidechains for their transcripts)._", ""]
     return "\n".join(out).rstrip()
 
 
@@ -1357,7 +1409,7 @@ def print_completions(shell: str) -> None:
         print("autoload -U +X bashcompinit && bashcompinit")
     else:
         print("# add to ~/.bashrc: eval \"$(claude-handoff --completions bash)\"")
-    print(f'complete -W "{words}" claude-handoff')
+    print(f'complete -W "{words}" claude-handoff chf')
 
 
 def _copy_clipboard(text: str) -> str:
@@ -1699,8 +1751,9 @@ def merge_parsed(parsed_list: list[dict]) -> dict:
         m["models"] |= pm["models"]
         m["first_ts"] = m["first_ts"] or pm["first_ts"]
         m["last_ts"] = pm["last_ts"] or m["last_ts"]
-        for key in ("n_user", "n_assistant", "n_tools", "tok_in", "tok_out"):
-            m[key] += pm[key]
+        for key in ("n_user", "n_assistant", "n_tools", "n_agents",
+                    "tok_in", "tok_out"):
+            m[key] += pm.get(key, 0)
         m["summaries"].extend(pm["summaries"])
         label = (pm["summaries"][-1] if pm["summaries"]
                  else f"{pm['n_user']} user messages")

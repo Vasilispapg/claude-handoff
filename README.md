@@ -15,7 +15,7 @@ Claude Code stores every session locally as JSONL (`~/.claude/projects/…/*.jso
 - **Zero dependencies.** One Python file, stdlib only. Python 3.9+.
 - **Deterministic by default.** No API call, no cost, works offline.
 - **`--llm` when you want a real summary.** Claude, OpenAI or Gemini via your own API key — or `--llm claude-cli`, which runs your locally-installed Claude Code CLI on your existing Pro/Max plan: **no API key at all**.
-- **Noise-free.** Drops tool results, thinking blocks, system reminders, subagent chatter, slash-command envelopes. Keeps user intent, assistant answers, files modified, commands run.
+- **Noise-free.** Drops tool results, thinking blocks, system reminders, subagent chatter, slash-command envelopes. Keeps user intent, assistant answers, files modified, commands run — including the files and commands of subagents (`agent-*.jsonl`), whose full transcripts stay behind `--include-sidechains`.
 
 ## Install
 
@@ -29,6 +29,9 @@ python3 claude_handoff.py --list
 # tab completion (bash or zsh):
 eval "$(claude-handoff --completions zsh)"
 ```
+
+Installing the package gives you two commands: `claude-handoff` and its
+short alias `chf` — identical, use whichever you like typing.
 
 ## Usage
 
@@ -44,7 +47,8 @@ claude-handoff -o clipboard        # straight to the clipboard — go paste it
 claude-handoff --last 5            # only the last 5 user turns
 claude-handoff --since 2h          # only the last 2 hours of the session
 claude-handoff --include-tools     # keep collapsed per-tool-call detail
-claude-handoff --include-sidechains  # append subagent (sidechain) work
+claude-handoff --include-sidechains  # append full subagent transcripts
+chf --last 5                       # `chf` = short alias, same tool
 
 # claude.ai AND ChatGPT web chats too (each app's data export):
 claude-handoff conversations.json --list
@@ -108,7 +112,7 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 | `--merge` | merge every session in scope into ONE handoff (session-break markers, summed activity) |
 | `--format md\|json` | markdown (default) or machine-readable JSON |
 | `-o clipboard` | copy the handoff straight to the clipboard |
-| `--include-sidechains` | append a section with subagent (sidechain) work |
+| `--include-sidechains` | append full subagent transcripts (inline sidechains and `<session-id>/subagents/agent-*.jsonl`); their file/command activity is always counted |
 | `-i` / `--interactive` | pick the session from a numbered list |
 | `--install-hook` / `--uninstall-hook` | auto-write a handoff to `~/.claude/handoffs/` when each session ends |
 | `--completions bash\|zsh` | print a tab-completion snippet |

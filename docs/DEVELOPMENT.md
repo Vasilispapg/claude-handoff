@@ -59,6 +59,20 @@ Noise conventions discovered:
 - `isMeta: true` user records (not real human input).
 - `isSidechain: true` records — subagent branches.
 
+Subagent transcripts, separate-file shape (v0.9.0, observed on Claude
+Code v2.x): newer versions no longer inline subagent records — each agent
+gets its own file at `<project>/<session-id>/subagents/agent-<id>.jsonl`,
+next to the session's JSONL. Same `user`/`assistant` record schema as the
+main file (all with `isSidechain: true`), plus extra envelope fields:
+`agentId` (matches the filename), `promptId`, `sourceToolAssistantUUID`
+(links back to the main-session assistant record that issued the `Agent`
+tool call), and `attributionAgent`/`attributionSkill`/`attributionPlugin`.
+The file's **first user record is the agent's task prompt**; the parent
+session references the agent only through the `Agent` tool_use/tool_result
+pair (`agentId: <id>` inside the result text). Discovery is
+directory-based (`_parse_agent_files`), not id-based, so it needs no
+fragile parsing of that result text.
+
 ## 3. Design decisions
 
 | Decision | Rationale |
@@ -67,6 +81,7 @@ Noise conventions discovered:
 | Deterministic mode is the default | Zero cost, offline, no API key, reproducible. LLM summarization is opt-in (`--llm`). |
 | Parse defensively | Content may be string *or* list; unknown record types are skipped, corrupt lines tolerated (`errors="replace"`, per-line `try/except`). Schema drift is the main long-term risk. |
 | Drop, don't keep: tool results, thinking, sidechains, meta | Tool results are bulky and re-derivable; thinking is private reasoning; sidechains are another agent's transcript. The *activity summary* (files touched, commands run) preserves the useful residue. |
+| Subagent activity merged by default, transcripts opt-in, v0.9.0 | With separate-file agent transcripts the "useful residue" rule broke: in multi-agent sessions the real edits happen in agent lanes, so a default handoff claimed "no files changed". Now agent files/commands always merge into the activity summary (with a 🤖 marker line + count), while full agent texts stay behind `--include-sidechains` — same lean-by-default philosophy. |
 | Merge consecutive assistant records into one turn | One user prompt can produce dozens of assistant API-call records interleaved with tool results. A reader wants turns, not records. |
 | Head+tail truncation, never head-only | Per message (70/20) and globally (35/60): the opening sets the goal, the recent end is the current state — the middle is the most expendable. |
 | LLM calls via raw `urllib` | No SDKs → no dependencies. Keys from env, model overridable with `--model` since default model ids rot quickly. |
@@ -92,7 +107,11 @@ Noise conventions discovered:
 2. **Parsing** — `parse_session()` is the heart: single pass over records,
    producing `meta` (session id, cwd, branch, models, timestamps, counts),
    `turns` (role + text parts + tool one-liners), `files_written/read`,
-   `commands`, and a `tool_use_id → name` map.
+   `commands`, and a `tool_use_id → name` map. `_parse_agent_files()` then
+   folds separate-file subagent transcripts (`<session-id>/subagents/
+   agent-*.jsonl`) into the same state: their files/commands join the
+   activity dicts, their prompt + assistant texts become sidechain groups
+   (sorted by first timestamp), and `meta.n_agents` counts them.
 3. **Rendering** — `render_header` (preamble + session facts),
    `render_activity` (files created/modified with edit counts, deduped
    command list), `render_transcript` (🧑/🤖 turns; tools collapsed into

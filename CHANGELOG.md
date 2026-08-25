@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0 — 2026-08-25
+
+- **Multi-agent sessions**: separate-file subagent transcripts
+  (`<session-id>/subagents/agent-*.jsonl`, newer Claude Code) are now
+  discovered and parsed. Their file edits and commands always merge into
+  the activity summary (marked with a 🤖 count line — previously a
+  multi-agent session's handoff showed almost no activity); full agent
+  transcripts render with `--include-sidechains`, ordered by start time.
+  `meta.n_agents` lands in `--format json` too.
+- **`chf`**: short console alias for `claude-handoff` (both installed;
+  shell completions cover both).
+
 ## 0.8.1 — 2026-08-23
 
 - MCP Registry metadata: `server.json` for

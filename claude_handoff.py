@@ -15,6 +15,8 @@ Usage:
     claude-handoff --list               # list available sessions
     claude-handoff -i                   # numbered interactive picker
     claude-handoff --name "login bug"   # newest session matching a name
+    claude-handoff --grep "CORS"        # newest session that talked about it
+    claude-handoff --fit 32k            # sized to fit a 32k-token context
     claude-handoff --project myrepo --merge   # whole project, one handoff
     claude-handoff --last 5 -o clipboard      # recent turns -> clipboard
     claude-handoff --llm claude-cli --focus "emphasize the API decisions"
@@ -51,7 +53,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -208,8 +210,44 @@ def find_session_by_name(query: str,
     return matches
 
 
-def list_sessions(project_filter: str | None) -> None:
-    sessions = find_sessions(project_filter)
+def grep_sessions(pattern: str,
+                  project_filter: str | None = None) -> list[tuple]:
+    """Sessions whose conversation text (user/assistant turns) contains
+    `pattern` (case-insensitive substring), newest first, each paired with
+    a short match preview. Tool noise doesn't count — only what the human
+    and the assistant actually said."""
+    needle = pattern.lower()
+    hits = []
+    for path in find_sessions(project_filter):
+        try:
+            parsed = parse_session(path)
+        except OSError:
+            continue  # unreadable file must not kill the search
+        for turn in parsed["turns"]:
+            if turn["role"] not in ("user", "assistant"):
+                continue
+            text = "\n".join(turn["text_parts"])
+            idx = text.lower().find(needle)
+            if idx >= 0:
+                start = max(0, idx - 40)
+                preview = text[start:idx + len(needle) + 40]
+                hits.append((path, one_line(preview, 100)))
+                break
+    return hits
+
+
+def list_sessions(project_filter: str | None, grep: str | None = None) -> None:
+    if grep:
+        pairs = grep_sessions(grep, project_filter)
+        previews = dict(pairs)
+        sessions = [p for p, _ in pairs]
+        if not sessions:
+            print(f"No session text matches {grep!r} under {PROJECTS_DIR}",
+                  file=sys.stderr)
+            return
+    else:
+        previews = {}
+        sessions = find_sessions(project_filter)
     if not sessions:
         print(f"No sessions found under {PROJECTS_DIR}", file=sys.stderr)
         return
@@ -221,6 +259,8 @@ def list_sessions(project_filter: str | None) -> None:
         label = f"{title} · {prompt}" if title else prompt
         print(f"{mtime}  {size_kb:>6} KB  {p.stem[:8]}  {proj}")
         print(f"                              └─ {one_line(label, 110)}")
+        if p in previews:
+            print(f"                              🔍 {previews[p]}")
 
 
 # --------------------------------------------------------------------------- #
@@ -350,7 +390,8 @@ def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
         meta["last_ts"] = ts or meta["last_ts"]
         state["turns"].append({"role": role, "text_parts": [text],
                                "tools": [], "ts": ts})
-    state.pop("_tool_names")
+    for key in [k for k in state if k.startswith("_")]:
+        state.pop(key)
     state.pop("sidechains", None)
     return state
 
@@ -473,6 +514,8 @@ def _new_parse_state() -> dict:
         "commands": [],
         "sidechains": [],       # {"prompt", "texts"} — subagent branches
         "_tool_names": {},      # tool_use_id -> tool name (internal)
+        "_agent_descs": {},     # tool_use_id -> Agent/Task description
+        "_agent_labels": {},    # agentId -> lane description (internal)
     }
 
 
@@ -502,6 +545,10 @@ def _handle_tool_use(block: dict, turn: dict, state: dict) -> bool:
     """Record one tool_use block. Returns True if it produced assistant text."""
     name = block.get("name", "?")
     state["_tool_names"][block.get("id", "")] = name
+    if name in ("Agent", "Task"):
+        desc = (block.get("input") or {}).get("description")
+        if desc:  # lane label for the agent this call spawns
+            state["_agent_descs"][block.get("id", "")] = desc
     # In SDK/Cowork sessions the assistant's prose is sent via this tool —
     # recover it as normal assistant text.
     if name == "SendUserMessage":
@@ -572,11 +619,13 @@ def _handle_user_record(rec: dict, state: dict) -> None:
         for b in content
     ):
         # Tool results echoed back are noise — except answers the human
-        # gave to AskUserQuestion, which are real user input.
+        # gave to AskUserQuestion, which are real user input, and Agent
+        # launch results, which carry the agentId → lane-label link.
         for b in content:
-            if (isinstance(b, dict) and b.get("type") == "tool_result"
-                    and state["_tool_names"].get(b.get("tool_use_id", ""))
-                    == "AskUserQuestion"):
+            if not (isinstance(b, dict) and b.get("type") == "tool_result"):
+                continue
+            name = state["_tool_names"].get(b.get("tool_use_id", ""))
+            if name == "AskUserQuestion":
                 answer = tool_result_text(b)
                 if answer:
                     state["meta"]["n_user"] += 1
@@ -584,6 +633,11 @@ def _handle_user_record(rec: dict, state: dict) -> None:
                                            "text_parts": [answer],
                                            "tools": [],
                                            "ts": rec.get("timestamp")})
+            elif name in ("Agent", "Task"):
+                desc = state["_agent_descs"].get(b.get("tool_use_id", ""))
+                m = re.search(r"agentId:\s*([0-9a-f]+)", tool_result_text(b))
+                if desc and m:
+                    state["_agent_labels"][m.group(1)] = desc
         return
     text = clean_text(user_text(message))
     if not text:
@@ -620,6 +674,15 @@ def _handle_sidechain_record(rec: dict, state: dict) -> None:
             groups[-1]["texts"].append(block["text"].strip())
 
 
+def _drain_agent_texts(sub: dict, texts: list, drained: int) -> int:
+    """Move assistant texts accumulated in a sub-parse since the last drain
+    into `texts` — keeps parent steering messages chronologically placed."""
+    flat = [part for turn in sub["turns"] if turn["role"] == "assistant"
+            for part in turn["text_parts"]]
+    texts.extend(flat[drained:])
+    return len(flat)
+
+
 def _parse_agent_files(session_path: Path, state: dict) -> None:
     """Fold separate-file subagent transcripts into the parse state.
 
@@ -639,18 +702,23 @@ def _parse_agent_files(session_path: Path, state: dict) -> None:
     for fp in agent_files:
         sub = _new_parse_state()
         prompt = None
+        texts: list = []
+        drained = 0
         for rec in load_records(fp):
             rtype = rec.get("type")
             if rtype == "assistant":
                 _handle_assistant_record(rec, sub)
-            elif rtype == "user" and prompt is None:
-                # the agent's first user message is its task prompt
+            elif rtype == "user" and not rec.get("isMeta"):
                 text = clean_text(user_text(rec.get("message") or {}))
-                if text:
+                if text and prompt is None:
+                    # the agent's first user message is its task prompt
                     prompt = text
+                elif text:
+                    # later user text = mid-run steering from the parent
+                    drained = _drain_agent_texts(sub, texts, drained)
+                    texts.append(f"🧭 Parent: {text}")
             _update_envelope_meta(rec, sub["meta"])
-        texts = [part for turn in sub["turns"]
-                 if turn["role"] == "assistant" for part in turn["text_parts"]]
+        _drain_agent_texts(sub, texts, drained)
         if not (prompt or texts or sub["files_written"] or sub["commands"]):
             continue  # empty or foreign file
         for key in ("files_written", "files_read"):
@@ -658,9 +726,10 @@ def _parse_agent_files(session_path: Path, state: dict) -> None:
                 state[key][f] = state[key].get(f, 0) + n
         state["commands"].extend(sub["commands"])
         state["meta"]["n_agents"] += 1
+        agent_id = fp.stem.removeprefix("agent-")
         groups.append({"prompt": one_line(prompt, 120) if prompt else None,
-                       "texts": texts,
-                       "agent_id": fp.stem.removeprefix("agent-"),
+                       "texts": texts, "agent_id": agent_id,
+                       "label": state["_agent_labels"].get(agent_id),
                        "ts": sub["meta"]["first_ts"]})
     groups.sort(key=lambda g: (g["ts"] is None, g["ts"] or ""))
     state["sidechains"].extend(groups)
@@ -688,7 +757,8 @@ def parse_session(path: Path) -> dict:
     # drop empty turns (e.g. assistant records that carried only thinking)
     state["turns"] = [t for t in state["turns"]
                       if t["text_parts"] or t["tools"]]
-    state.pop("_tool_names")
+    for key in [k for k in state if k.startswith("_")]:
+        state.pop(key)
     return state
 
 
@@ -867,9 +937,13 @@ def render_sidechains(parsed: dict, max_each: int = 2000) -> str:
         return ""
     out = ["## Subagent work (sidechains)", ""]
     for g in groups:
+        label = g.get("label")
         prompt = g["prompt"] or "(task prompt not recorded)"
-        out.append(f"### Subagent: {prompt}")
+        out.append(f"### Subagent: {label or prompt}")
         out.append("")
+        if label and g["prompt"]:
+            out.append(f"Task: {g['prompt']}")
+            out.append("")
         out.append(truncate("\n\n".join(g["texts"]), max_each))
         out.append("")
     return "\n".join(out).rstrip()
@@ -1366,12 +1440,22 @@ def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
 #  CLI
 # --------------------------------------------------------------------------- #
 
-def interactive_pick(project_filter: str | None) -> Path:
+def interactive_pick(project_filter: str | None,
+                     grep: str | None = None) -> Path:
     """Numbered session picker (-i). Terminal only."""
     if not sys.stdin.isatty():
         raise SystemExit("-i needs a terminal (stdin is piped) — use "
                          "--name/--project for scripted selection.")
-    sessions = find_sessions(project_filter)[:15]
+    if grep:
+        pairs = grep_sessions(grep, project_filter)[:15]
+        sessions = [p for p, _ in pairs]
+        previews = dict(pairs)
+        if not sessions:
+            raise SystemExit(f"No session text matches {grep!r} — "
+                             f"try --any, or run --list.")
+    else:
+        sessions = find_sessions(project_filter)[:15]
+        previews = {}
     if not sessions:
         raise SystemExit(f"No sessions found under {PROJECTS_DIR}.")
     for n, p in enumerate(sessions, 1):
@@ -1381,6 +1465,8 @@ def interactive_pick(project_filter: str | None) -> Path:
         mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d %H:%M")
         print(f" {n:>2}. {mtime}  {one_line(proj, 44)}\n"
               f"      {one_line(label, 90)}", file=sys.stderr)
+        if p in previews:
+            print(f"      🔍 {previews[p]}", file=sys.stderr)
     while True:
         try:
             choice = input(f"Pick a session [1-{len(sessions)}, q quits]: ")
@@ -1492,9 +1578,9 @@ def _mcp_call(name: str, arguments: dict | None) -> str:
             raise ValueError("session has no conversation turns")
         if a.get("last"):
             slice_turns(parsed, last=int(a["last"]))
-        return build_deterministic(parsed, source,
-                                   include_tools=bool(a.get("include_tools")),
-                                   max_chars=DEFAULT_MAX_CHARS)
+        return redact_doc(build_deterministic(
+            parsed, source, include_tools=bool(a.get("include_tools")),
+            max_chars=DEFAULT_MAX_CHARS), hint=False)
     raise ValueError(f"unknown tool: {name}")
 
 
@@ -1627,10 +1713,9 @@ def run_hook_mode() -> None:
             return
         HANDOFFS_DIR.mkdir(parents=True, exist_ok=True)
         out = HANDOFFS_DIR / f"{transcript.stem}.md"
-        out.write_text(build_deterministic(parsed, transcript,
-                                           include_tools=False,
-                                           max_chars=DEFAULT_MAX_CHARS),
-                       encoding="utf-8")
+        out.write_text(redact_doc(build_deterministic(
+            parsed, transcript, include_tools=False,
+            max_chars=DEFAULT_MAX_CHARS), hint=False), encoding="utf-8")
         print(f"handoff written: {out}")
     except Exception:  # noqa: BLE001 — deliberately swallow: see docstring
         return
@@ -1666,6 +1751,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--name", metavar="QUERY",
                     help="pick newest session whose title or first prompt "
                          "contains QUERY (case-insensitive)")
+    ap.add_argument("--grep", metavar="TEXT",
+                    help="pick newest session whose conversation contains "
+                         "TEXT (case-insensitive; combines with --list/-i "
+                         "to show all matches)")
     ap.add_argument("--project", metavar="NAME",
                     help="pick latest session whose project path contains NAME")
     ap.add_argument("--merge", action="store_true",
@@ -1702,8 +1791,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "list_sessions, handoff)")
     ap.add_argument("--hook-stdin", action="store_true",
                     help=argparse.SUPPRESS)
-    ap.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS,
+    ap.add_argument("--max-chars", type=int, default=None,
                     help=f"cap transcript section size (default {DEFAULT_MAX_CHARS})")
+    ap.add_argument("--fit", metavar="TOKENS", type=_parse_budget,
+                    help="size the deterministic handoff to a token budget "
+                         "(e.g. 32k, 128k, 1m) by tightening transcript "
+                         "truncation; not combinable with --llm/--max-chars")
     ap.add_argument("--llm", choices=sorted(PROVIDERS),
                     help="summarize with an LLM instead of deterministic export; "
                          "claude-cli uses your local Claude Code login, no API key")
@@ -1806,7 +1899,22 @@ def resolve_source(args: argparse.Namespace) -> Path:
         scope = args.project
         if not scope and not args.any:
             scope = cwd_project_filter()
-        return interactive_pick(scope)
+        return interactive_pick(scope, grep=args.grep)
+    if args.grep:
+        if args.session or args.name:
+            raise SystemExit("--grep searches content on its own — combine "
+                             "it with --project/--any, not a path or --name.")
+        scope = args.project
+        if not scope and not args.any:
+            scope = cwd_project_filter()
+        hits = grep_sessions(args.grep, scope)
+        if not hits:
+            raise SystemExit(f"No session text matches {args.grep!r} — try "
+                             f"--any for all projects, or run --list.")
+        source, preview = hits[0]
+        print(f"Using session {source.stem[:8]} — 🔍 {preview}",
+              file=sys.stderr)
+        return source
     if args.session:
         source = Path(args.session).expanduser()
         if source.is_file():
@@ -1839,9 +1947,47 @@ def resolve_source(args: argparse.Namespace) -> Path:
     return source
 
 
+def _parse_budget(spec: str) -> int:
+    """'32k' / '1m' / '128000' → token count (argparse type for --fit)."""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([km]?)", spec.strip().lower())
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"cannot parse token budget {spec!r} — use e.g. 32k, 128k, 1m")
+    mult = {"": 1, "k": 1_000, "m": 1_000_000}[m.group(2)]
+    return int(float(m.group(1)) * mult)
+
+
+def _fmt_tokens(n: int) -> str:
+    return f"{n / 1e6:.1f}M" if n >= 1_000_000 else f"{n / 1000:.1f}k"
+
+
+def _fit_transcript_cap(parsed: dict, source: Path,
+                        args: argparse.Namespace, tokens: int) -> int:
+    """Char cap for the transcript so the whole document roughly fits
+    `tokens` (≈4 chars/token). Fixed sections are measured, never trimmed."""
+    overhead = sum(len(s) + 2 for s in (
+        render_header(parsed, source),
+        render_activity(parsed),
+        render_sidechains(parsed) if args.include_sidechains else "",
+        render_footer()))
+    return max(2000, tokens * 4 - overhead)
+
+
+def redact_doc(doc: str, hint: bool = True) -> str:
+    """Redact the final document — a written or pasted handoff is egress
+    too, not just what goes to an LLM."""
+    doc, n = redact_secrets(doc)
+    if n:
+        note = " (--no-redact to disable)" if hint else ""
+        print(f"Redacted {n} secret-looking string(s) in the "
+              f"output{note}.", file=sys.stderr)
+    return doc
+
+
 def build_document(parsed: dict, source: Path,
                    args: argparse.Namespace) -> str:
     """Markdown or JSON document, deterministic or LLM-summarized."""
+    max_chars = DEFAULT_MAX_CHARS if args.max_chars is None else args.max_chars
     if args.format == "json":
         summary = None
         if args.llm:
@@ -1856,24 +2002,33 @@ def build_document(parsed: dict, source: Path,
             summary = llm_summarize(args.llm, args.model, outbound,
                                     focus=args.focus,
                                     use_cache=not args.no_cache)
-        return build_json(parsed, source, summary)
-    if args.llm:
-        return build_llm(parsed, source, args.llm, args.model,
-                         args.with_transcript, args.max_chars,
-                         focus=args.focus, redact=not args.no_redact,
-                         use_cache=not args.no_cache)
-    return build_deterministic(parsed, source, args.include_tools,
-                               args.max_chars,
-                               include_sidechains=args.include_sidechains)
+        doc = build_json(parsed, source, summary)
+    elif args.llm:
+        doc = build_llm(parsed, source, args.llm, args.model,
+                        args.with_transcript, max_chars,
+                        focus=args.focus, redact=not args.no_redact,
+                        use_cache=not args.no_cache)
+    else:
+        if getattr(args, "fit", None):
+            max_chars = _fit_transcript_cap(parsed, source, args, args.fit)
+        doc = build_deterministic(parsed, source, args.include_tools,
+                                  max_chars,
+                                  include_sidechains=args.include_sidechains)
+    return doc if args.no_redact else redact_doc(doc)
 
 
 def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
+    tok = f"≈{_fmt_tokens(len(doc) // 4)} tokens"
+    if getattr(args, "fit", None):
+        tok += f" (target {_fmt_tokens(args.fit)})"
     if args.output == "-":
         sys.stdout.write(doc)
+        if getattr(args, "fit", None):
+            print(f"Handoff {tok}.", file=sys.stderr)
         return
     if args.output in ("clipboard", "clip"):
         tool = _copy_clipboard(doc)
-        print(f"Copied to clipboard via {tool} ({len(doc):,} chars, "
+        print(f"Copied to clipboard via {tool} ({len(doc):,} chars, {tok}, "
               f"{parsed['meta']['n_user']} user messages"
               f"{', LLM-summarized' if args.llm else ''}) — paste away.",
               file=sys.stderr)
@@ -1881,12 +2036,15 @@ def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
     out = Path(args.output)
     out.write_text(doc, encoding="utf-8")
     n_user = parsed["meta"]["n_user"]
-    print(f"Wrote {out} ({len(doc):,} chars, {n_user} user messages"
+    print(f"Wrote {out} ({len(doc):,} chars, {tok}, {n_user} user messages"
           f"{', LLM-summarized' if args.llm else ''})", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
+    if args.fit and (args.llm or args.max_chars is not None):
+        raise SystemExit("--fit sizes the deterministic output on its own — "
+                         "drop --llm / --max-chars when using it.")
     if args.mcp:
         run_mcp_server()
         return
@@ -1903,7 +2061,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.session and is_web_export(Path(args.session).expanduser()):
             list_export_conversations(Path(args.session).expanduser())
         else:
-            list_sessions(args.project)
+            list_sessions(args.project, grep=args.grep)
         return
     if args.merge:
         if args.session:

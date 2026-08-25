@@ -24,7 +24,9 @@ schema notes before touching the parser.
 - **Never invent transcript content.** The exporter reorganizes and
   truncates; it must not fabricate.
 - **Redact before egress.** Secret-shaped strings are stripped from
-  anything sent to an LLM (`redact_secrets`); default on.
+  anything sent to an LLM *and* from every final document (`redact_secrets`
+  via `redact_doc` — a written or pasted handoff is egress too); default on,
+  `--no-redact` opts out (CLI only; hook and MCP always redact).
 - **Never truncate instructions.** Size caps may trim transcripts and
   chunk notes, never the prompt rules or the user's `--focus`.
 - **Cache is best-effort and content-addressed.** A cache failure must
@@ -47,7 +49,8 @@ pip install -e . && claude-handoff --version  # packaging check
 ## Architecture map (claude_handoff.py)
 
 - Discovery: `find_sessions`, `session_label` (title + first prompt),
-  `find_session_by_name`, `list_sessions`, `cwd_project_filter`
+  `find_session_by_name`, `grep_sessions` (--grep: content search with
+  match previews), `list_sessions`, `cwd_project_filter`
 - Web-export input: `is_web_export`, `parse_web_export` (claude.ai
   `chat_messages` AND ChatGPT `mapping`/`current_node`; same parsed shape
   as `parse_session`), `list_export_conversations`
@@ -60,7 +63,8 @@ pip install -e . && claude-handoff --version  # packaging check
   `--hook-stdin`) — hook mode swallows all errors by design: a hook must
   never break the host Claude Code session. Sidechains:
   `_handle_sidechain_record` (inline records), `_parse_agent_files`
-  (separate agent-*.jsonl transcripts), `render_sidechains`.
+  (separate agent-*.jsonl transcripts; lane labels via `_agent_labels`,
+  parent steering via `_drain_agent_texts`), `render_sidechains`.
 - Parsing: `parse_session` (coordinator) + single-responsibility helpers
   `_handle_assistant_record`, `_handle_user_record`, `_handle_tool_use`,
   `_update_envelope_meta`; text utils `user_text`, `tool_result_text`,
@@ -73,8 +77,9 @@ pip install -e . && claude-handoff --version  # packaging check
   `build_llm`, `SUMMARY_PROMPT`
 - CLI: `_HelpfulParser` (the one allowed class — argparse's designed
   extension point, so usage errors point to --help/--list),
-  `build_arg_parser`, `resolve_source` (path → name match → newest),
-  `build_document`, `write_output`, `main`
+  `build_arg_parser`, `resolve_source` (path → grep → name match → newest),
+  `redact_doc` (output redaction), `_parse_budget`/`_fit_transcript_cap`
+  (--fit token budgets), `build_document`, `write_output`, `main`
 
 **Adding an LLM provider** = one `_call_*` function + one `PROVIDERS`
 entry. Do not add if/elif provider chains anywhere (open/closed).

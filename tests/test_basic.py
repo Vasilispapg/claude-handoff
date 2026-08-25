@@ -14,6 +14,7 @@ import claude_handoff as ch  # noqa: E402
 FIXTURE = ROOT / "tests" / "fixtures" / "classic_session.jsonl"
 TRIVIAL = ROOT / "tests" / "fixtures" / "trivial_session.jsonl"
 AGENT_SESSION = ROOT / "tests" / "fixtures" / "agent_session.jsonl"
+SECRET = ROOT / "tests" / "fixtures" / "secret_session.jsonl"
 
 
 class ParseTests(unittest.TestCase):
@@ -196,6 +197,27 @@ class AgentSessionTests(unittest.TestCase):
         text = str(self.parsed["turns"])
         self.assertNotIn("Ενημερώνω τα docs", text)       # agent chatter
         self.assertIn("Οι δύο agents τελείωσαν", text)    # main convo intact
+
+    def test_lane_labels_from_agent_tool_calls(self):
+        groups = self.parsed["sidechains"]
+        self.assertEqual(groups[0]["label"], "Docs update lane")
+        self.assertEqual(groups[1]["label"], "Backend fix lane")
+
+    def test_label_used_as_heading_prompt_moves_to_body(self):
+        doc = ch.build_deterministic(self.parsed, AGENT_SESSION,
+                                     include_tools=False, max_chars=80_000,
+                                     include_sidechains=True)
+        self.assertIn("### Subagent: Docs update lane", doc)
+        self.assertIn("Task: Update the docs for the new API", doc)
+
+    def test_parent_steering_messages_interleaved_in_texts(self):
+        joined = "\n".join(self.parsed["sidechains"][0]["texts"])
+        self.assertIn("🧭 Parent: Και πρόσθεσε ένα παράδειγμα", joined)
+        self.assertLess(joined.index("Ενημερώνω τα docs"),
+                        joined.index("🧭 Parent:"))       # chronological
+        self.assertLess(joined.index("🧭 Parent:"),
+                        joined.index("docs ενημερώθηκαν"))
+        self.assertNotIn("meta noise", joined)            # isMeta filtered
 
     def test_render_marker_by_default_full_texts_with_flag(self):
         doc = ch.build_deterministic(self.parsed, AGENT_SESSION,
@@ -397,6 +419,131 @@ COMPACTED = ROOT / "tests" / "fixtures" / "compacted_session.jsonl"
 
 
 CHATGPT_EXPORT = ROOT / "tests" / "fixtures" / "chatgpt_export.json"
+
+
+class FitTests(unittest.TestCase):
+    """--fit: size the deterministic handoff to a token budget."""
+
+    def test_parse_budget_forms(self):
+        self.assertEqual(ch._parse_budget("32k"), 32_000)
+        self.assertEqual(ch._parse_budget("1m"), 1_000_000)
+        self.assertEqual(ch._parse_budget("128000"), 128_000)
+
+    def test_parse_budget_rejects_garbage(self):
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit):
+            ch.build_arg_parser().parse_args(["--fit", "banana"])
+
+    def test_fit_caps_document_size(self):
+        import contextlib
+        import io
+        parsed = ch.parse_session(FIXTURE)
+        parsed["turns"].append({"role": "user",
+                                "text_parts": ["x" * 50_000],
+                                "tools": [], "ts": None})
+        args = ch.build_arg_parser().parse_args([str(FIXTURE), "--fit", "2k"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            doc = ch.build_document(parsed, FIXTURE, args)
+        self.assertLess(len(doc), 12_000)         # ≈2k tokens, not 50k chars
+        self.assertIn("omitted", doc)
+
+    def test_fit_conflicts_with_llm_and_max_chars(self):
+        for extra in (["--llm", "claude"], ["--max-chars", "9000"]):
+            with self.assertRaises(SystemExit) as cm:
+                ch.main([str(FIXTURE), "--fit", "8k", *extra])
+            self.assertIn("--fit", str(cm.exception))
+
+    def test_fit_reports_estimate_with_target(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "h.md"
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                ch.main([str(FIXTURE), "--fit", "8k", "-o", str(out)])
+            self.assertTrue(out.exists())
+        self.assertIn("tokens", buf.getvalue())
+        self.assertIn("target", buf.getvalue())
+
+    def test_every_write_reports_token_estimate(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "h.md"
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                ch.main([str(FIXTURE), "-o", str(out)])
+        self.assertIn("tokens", buf.getvalue())
+
+
+class GrepTests(unittest.TestCase):
+    """--grep: find sessions by conversation content, not just title."""
+
+    def _patch(self):
+        return unittest.mock.patch.object(
+            ch, "find_sessions", lambda *a, **k: [AGENT_SESSION, FIXTURE])
+
+    def test_grep_matches_conversation_text(self):
+        with self._patch():
+            hits = ch.grep_sessions("unicode")
+        self.assertEqual([p for p, _ in hits], [FIXTURE])
+        self.assertIn("unicode", hits[0][1].lower())    # preview has context
+
+    def test_grep_is_case_insensitive(self):
+        with self._patch():
+            self.assertEqual(len(ch.grep_sessions("UNICODE")), 1)
+
+    def test_grep_ignores_tool_noise(self):
+        with self._patch():
+            self.assertEqual(ch.grep_sessions("3 passed"), [])  # tool result
+
+    def test_resolve_source_grep_picks_newest_match(self):
+        import contextlib
+        import io
+        with self._patch(), contextlib.redirect_stderr(io.StringIO()):
+            args = ch.build_arg_parser().parse_args(["--grep", "unicode"])
+            self.assertEqual(ch.resolve_source(args), FIXTURE)
+
+    def test_resolve_source_grep_no_match_hints(self):
+        import contextlib
+        import io
+        with self._patch(), contextlib.redirect_stderr(io.StringIO()):
+            args = ch.build_arg_parser().parse_args(["--grep", "zzz-nope"])
+            with self.assertRaises(SystemExit) as cm:
+                ch.resolve_source(args)
+        self.assertIn("--list", str(cm.exception))
+
+    def test_grep_refuses_name_combo(self):
+        args = ch.build_arg_parser().parse_args(["--grep", "x", "--name", "y"])
+        with self.assertRaises(SystemExit) as cm:
+            ch.resolve_source(args)
+        self.assertIn("--grep", str(cm.exception))
+
+    def test_list_with_grep_shows_only_matches_with_preview(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with self._patch(), contextlib.redirect_stdout(buf):
+            ch.list_sessions(None, grep="unicode")
+        out = buf.getvalue()
+        self.assertIn("🔍", out)
+        self.assertIn("classic_", out)
+        self.assertNotIn("agent_se", out)
+
+    def test_interactive_pick_with_grep_filters_list(self):
+        import contextlib
+        import io
+        with self._patch(), \
+                unittest.mock.patch.object(ch.sys.stdin, "isatty",
+                                           lambda: True), \
+                unittest.mock.patch("builtins.input", side_effect=["1"]), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ch.interactive_pick(None, grep="unicode"),
+                             FIXTURE)
 
 
 class PickerTests(unittest.TestCase):
@@ -763,6 +910,65 @@ class OllamaTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 ch.llm_summarize("ollama", None, "x")
         self.assertIn("ollama serve", str(cm.exception))
+
+
+class RedactOutputTests(unittest.TestCase):
+    """v0.10.0: the final document is egress too — redacted by default."""
+
+    def _doc(self, *extra):
+        import contextlib
+        import io
+        parsed = ch.parse_session(SECRET)
+        args = ch.build_arg_parser().parse_args([str(SECRET), *extra])
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            doc = ch.build_document(parsed, SECRET, args)
+        return doc, buf.getvalue()
+
+    def test_deterministic_doc_redacted_by_default(self):
+        doc, err = self._doc()
+        self.assertNotIn("sk-ant-abc123", doc)
+        self.assertNotIn("ghp_abcdefghij", doc)
+        self.assertIn("[REDACTED]", doc)
+        self.assertIn("Redacted", err)
+        self.assertIn("--no-redact", err)
+
+    def test_no_redact_keeps_content(self):
+        doc, err = self._doc("--no-redact")
+        self.assertIn("sk-ant-abc123def456ghi789jkl", doc)
+        self.assertNotIn("Redacted", err)
+
+    def test_json_format_redacted_and_still_valid(self):
+        doc, _ = self._doc("--format", "json")
+        data = json.loads(doc)                    # redaction kept JSON valid
+        self.assertNotIn("sk-ant-abc123", doc)
+        self.assertIn("deploy", str(data["turns"]))
+
+    def test_mcp_handoff_redacted(self):
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()):
+            out = ch._mcp_call("handoff", {"path": str(SECRET)})
+        self.assertNotIn("sk-ant-abc123", out)
+        self.assertIn("[REDACTED]", out)
+
+    def test_hook_output_redacted(self):
+        import contextlib
+        import io
+        import tempfile
+        payload = json.dumps({"transcript_path": str(SECRET)})
+        with tempfile.TemporaryDirectory() as td:
+            with unittest.mock.patch.object(ch, "HANDOFFS_DIR", Path(td)), \
+                    unittest.mock.patch.object(sys, "stdin",
+                                               io.StringIO(payload)), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.run_hook_mode()
+            files = list(Path(td).glob("*.md"))
+            self.assertEqual(len(files), 1)
+            text = files[0].read_text(encoding="utf-8")
+            self.assertNotIn("sk-ant-abc123", text)
+            self.assertIn("[REDACTED]", text)
 
 
 class ZeroTrustTests(unittest.TestCase):

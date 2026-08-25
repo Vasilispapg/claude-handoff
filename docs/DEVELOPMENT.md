@@ -82,6 +82,9 @@ fragile parsing of that result text.
 | Parse defensively | Content may be string *or* list; unknown record types are skipped, corrupt lines tolerated (`errors="replace"`, per-line `try/except`). Schema drift is the main long-term risk. |
 | Drop, don't keep: tool results, thinking, sidechains, meta | Tool results are bulky and re-derivable; thinking is private reasoning; sidechains are another agent's transcript. The *activity summary* (files touched, commands run) preserves the useful residue. |
 | Subagent activity merged by default, transcripts opt-in, v0.9.0 | With separate-file agent transcripts the "useful residue" rule broke: in multi-agent sessions the real edits happen in agent lanes, so a default handoff claimed "no files changed". Now agent files/commands always merge into the activity summary (with a 🤖 marker line + count), while full agent texts stay behind `--include-sidechains` — same lean-by-default philosophy. |
+| Output redaction by default, v0.10.0 | The tool's main use is pasting the handoff into a web chat — the document itself is egress, not just what goes to an LLM under `--llm`. `redact_doc` runs on every final document (CLI markdown/JSON, hook files, MCP replies); `--no-redact` opts out on the CLI, hook/MCP always redact. LLM-input redaction stays as defense in depth. |
+| `--grep` content search, v0.10.0 | `--name` only sees title + first prompt; "which session talked about CORS?" needs the conversation itself. Case-insensitive substring over parsed user/assistant turns (tool noise deliberately excluded), match preview shown in `--list`/`-i`. Substring, not regex — YAGNI until asked. |
+| `--fit` token budgets, v0.10.0 | Receivers have context limits; chars÷4 approximates tokens with zero dependencies. Fixed sections (header, activity, sidechains) are measured, the transcript cap absorbs the rest — instructions and structure are never trimmed, honoring the "never truncate instructions" invariant. Every write now reports a ≈token estimate. |
 | Merge consecutive assistant records into one turn | One user prompt can produce dozens of assistant API-call records interleaved with tool results. A reader wants turns, not records. |
 | Head+tail truncation, never head-only | Per message (70/20) and globally (35/60): the opening sets the goal, the recent end is the current state — the middle is the most expendable. |
 | LLM calls via raw `urllib` | No SDKs → no dependencies. Keys from env, model overridable with `--model` since default model ids rot quickly. |
@@ -111,7 +114,11 @@ fragile parsing of that result text.
    folds separate-file subagent transcripts (`<session-id>/subagents/
    agent-*.jsonl`) into the same state: their files/commands join the
    activity dicts, their prompt + assistant texts become sidechain groups
-   (sorted by first timestamp), and `meta.n_agents` counts them.
+   (sorted by first timestamp), and `meta.n_agents` counts them. Groups
+   carry a `label` — the `description` of the `Agent`/`Task` tool call that
+   spawned them, linked through the `agentId` in the launch tool_result —
+   and mid-run parent steering messages interleave into `texts` as
+   "🧭 Parent: …" lines (v0.10.0).
 3. **Rendering** — `render_header` (preamble + session facts),
    `render_activity` (files created/modified with edit counts, deduped
    command list), `render_transcript` (🧑/🤖 turns; tools collapsed into
@@ -217,9 +224,11 @@ text bumped the counter. Fixed with a per-record `added_text` flag.
   types skipped non-fatally, nothing evaluated.
 - *Transcript content*: routinely contains secrets pasted into commands —
   secret-shaped strings (`sk-…`, `ghp_…`, `AKIA…`, `AIza…`, JWTs, Slack
-  tokens, `KEY=value` assignments) are **redacted before any egress** to an
-  LLM (`redact_secrets`, on by default, `--no-redact` to opt out).
-  Deterministic mode never egresses anything.
+  tokens, `KEY=value` assignments) are **redacted before any egress**
+  (`redact_secrets`, on by default, `--no-redact` to opt out). Since
+  v0.10.0 "egress" includes the final document itself (`redact_doc` on CLI
+  markdown/JSON, hook files, and MCP replies) — the handoff's whole point
+  is to be pasted somewhere else. Hook and MCP outputs always redact.
 - *LLM output*: untrusted text — only ever written into markdown, never
   executed or parsed as commands.
 - *Subprocess (`claude-cli`)*: fixed argv list (no `shell=True`), scrubbed

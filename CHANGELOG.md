@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.0 — 2026-08-25
+
+- **Output redaction by default**: secret-looking strings are now stripped
+  from every final document (CLI markdown/JSON, `--install-hook` files,
+  MCP replies) — the pasted handoff is egress too, not just `--llm`
+  traffic. `--no-redact` opts out on the CLI; hook and MCP always redact.
+- **`--grep TEXT`**: find sessions by *conversation content* (user +
+  assistant turns; tool noise excluded). Alone it picks the newest match;
+  with `--list`/`-i` every match shows a 🔍 context preview.
+- **`--fit TOKENS`**: size the deterministic handoff to a token budget
+  (`32k`, `128k`, `1m`) — fixed sections are measured, the transcript cap
+  absorbs the rest. Every write now reports a ≈token estimate.
+- **Subagent lane labels**: groups are titled by the spawning
+  `Agent`/`Task` call's `description` (linked via `agentId`), with the
+  task prompt as a "Task:" line; mid-run parent steering messages
+  interleave as "🧭 Parent: …".
+
 ## 0.9.0 — 2026-08-25
 
 - **Multi-agent sessions**: separate-file subagent transcripts

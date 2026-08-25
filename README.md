@@ -16,6 +16,7 @@ Claude Code stores every session locally as JSONL (`~/.claude/projects/…/*.jso
 - **Deterministic by default.** No API call, no cost, works offline.
 - **`--llm` when you want a real summary.** Claude, OpenAI or Gemini via your own API key — or `--llm claude-cli`, which runs your locally-installed Claude Code CLI on your existing Pro/Max plan: **no API key at all**.
 - **Noise-free.** Drops tool results, thinking blocks, system reminders, subagent chatter, slash-command envelopes. Keeps user intent, assistant answers, files modified, commands run — including the files and commands of subagents (`agent-*.jsonl`), whose full transcripts stay behind `--include-sidechains`.
+- **Safe to paste.** Secret-looking strings (API keys, tokens, `password=`…) are redacted from every output — the handoff you paste into a web chat is egress too. `--no-redact` opts out.
 
 ## Install
 
@@ -41,6 +42,8 @@ claude-handoff -i                  # pick from a numbered list
 claude-handoff --list              # what sessions do I have? (title · first prompt)
 claude-handoff --name "login bug"  # newest session whose title/prompt matches
 claude-handoff "login bug"         # same — a non-path argument is a name search
+claude-handoff --grep "CORS"       # newest session that *talked about* CORS
+claude-handoff --fit 32k           # handoff sized to fit a 32k-token context
 claude-handoff --project myrepo    # latest session of a specific project
 claude-handoff path/to/session.jsonl -o -     # explicit file → stdout
 claude-handoff -o clipboard        # straight to the clipboard — go paste it
@@ -125,7 +128,9 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 | `--model ID` | override the LLM model |
 | `--focus TEXT` | extra instructions for the summary (e.g. `--focus "emphasize the API decisions"`) |
 | `--with-transcript` | with `--llm`, also append the cleaned transcript |
-| `--no-redact` | don't strip secret-looking strings before sending to the LLM |
+| `--grep TEXT` | pick newest session whose *conversation* contains TEXT; with `--list`/`-i` shows every match with a 🔍 preview |
+| `--fit TOKENS` | size the deterministic handoff to a token budget (`32k`, `128k`, `1m`) by tightening transcript truncation |
+| `--no-redact` | keep secret-looking strings (default: redacted from every output, LLM or not) |
 | `--no-cache` | disable the chunk-note cache (`~/.cache/claude-handoff`) |
 
 **API keys** (first set variable wins per provider):
@@ -142,7 +147,7 @@ Nothing is sent anywhere unless you pass `--llm`.
 
 **Where does it look?** Sessions live in Claude Code's global store (`~/.claude/projects`), so you can run `claude-handoff` from anywhere. If your current directory *is* a project (or a subfolder of one), it scopes to that project's sessions; a parent "master folder" scopes to every project under it; `--any` ignores the directory entirely.
 
-**Big sessions & privacy.** Transcripts beyond one pass (~400k chars) are summarized map-reduce style: notes per chunk, then one synthesis — nothing is silently dropped, and finished chunks are cached in `~/.cache/claude-handoff` so an interrupted run resumes for free. Secret-looking strings (API keys, tokens, `password=`…) are redacted before anything is sent to an LLM. In a terminal you get a live progress bar with elapsed time and an ETA:
+**Big sessions & privacy.** Transcripts beyond one pass (~400k chars) are summarized map-reduce style: notes per chunk, then one synthesis — nothing is silently dropped, and finished chunks are cached in `~/.cache/claude-handoff` so an interrupted run resumes for free. Secret-looking strings (API keys, tokens, `password=`…) are redacted from every output — what goes to an LLM *and* the handoff document itself. In a terminal you get a live progress bar with elapsed time and an ETA:
 
 ```text
 [█████████░░░░░░░░░░░░░░░] 3/9 chunks | 4m12s elapsed | ~8m left | summarizing part 4/8 (199,867 chars)…

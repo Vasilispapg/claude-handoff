@@ -56,7 +56,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -1575,14 +1575,10 @@ def _chunk_text(text: str, cap: int) -> list[str]:
     return chunks
 
 
-def llm_summarize(provider: str, model: str | None, transcript: str,
-                  focus: str | None = None, use_cache: bool = True) -> str:
-    """Summarize a transcript with the provider's call strategy.
-
-    Transcripts beyond LLM_INPUT_CAP are map-reduced: per-chunk notes
-    first (cached, retried), then one synthesis pass — nothing is
-    silently dropped. `focus` carries extra user instructions.
-    """
+def _resolve_provider(provider: str, model: str | None) -> tuple:
+    """Registry lookup + key/model resolution shared by every LLM
+    entry point; exits naming the accepted env vars when a key is
+    missing."""
     cfg = PROVIDERS.get(provider)
     if cfg is None:
         raise SystemExit(f"Unknown provider: {provider}. "
@@ -1591,7 +1587,18 @@ def llm_summarize(provider: str, model: str | None, transcript: str,
     if cfg["env_keys"] and not key:
         accepted = " or ".join(cfg["env_keys"])
         raise SystemExit(f"Set {accepted} to use --llm {provider}")
-    model = model or cfg["default_model"]
+    return cfg, key, model or cfg["default_model"]
+
+
+def llm_summarize(provider: str, model: str | None, transcript: str,
+                  focus: str | None = None, use_cache: bool = True) -> str:
+    """Summarize a transcript with the provider's call strategy.
+
+    Transcripts beyond LLM_INPUT_CAP are map-reduced: per-chunk notes
+    first (cached, retried), then one synthesis pass — nothing is
+    silently dropped. `focus` carries extra user instructions.
+    """
+    cfg, key, model = _resolve_provider(provider, model)
     extra = ("\nAdditional instructions from the user — follow them as "
              f"well:\n{focus.strip()}\n" if focus else "")
 
@@ -1708,6 +1715,272 @@ def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
 # --------------------------------------------------------------------------- #
 #  CLI
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+#  brief
+# --------------------------------------------------------------------------- #
+
+BRIEFS_DIR = Path(os.environ.get("CLAUDE_HOME",
+                                 str(Path.home() / ".claude"))) / "briefs"
+
+
+def brief_path(project_encoded: str) -> Path:
+    """Where the brief for one project lives (keyed like ~/.claude/projects)."""
+    return BRIEFS_DIR / f"{project_encoded}.md"
+
+
+def _session_line(parsed: dict) -> str:
+    """One timeline bullet: date, short id, title (or first prompt)."""
+    meta = parsed["meta"]
+    title = meta["summaries"][-1] if meta["summaries"] else None
+    if not title:
+        texts = [t for t in parsed["turns"] if t["role"] == "user"]
+        title = texts[0]["text_parts"][0] if texts else "(no prompt)"
+    sid = (meta["session_id"] or "?")[:8]
+    extras = [f"{meta['n_user']} msgs"]
+    if parsed["files_written"]:
+        extras.append(f"{len(parsed['files_written'])} files")
+    if meta.get("n_agents"):
+        extras.append(f"{meta['n_agents']} agents")
+    return (f"- **{fmt_ts(meta['first_ts'])}** `{sid}` — "
+            f"{one_line(title, 90)} ({', '.join(extras)})")
+
+
+def _activity_rollup(parsed_list: list, top: int = 15) -> list:
+    """Most-edited files across every session, most edits first."""
+    totals: dict = {}
+    for parsed in parsed_list:
+        for f, n in parsed["files_written"].items():
+            totals[f] = totals.get(f, 0) + n
+    return sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))[:top]
+
+
+def build_brief_deterministic(parsed_list: list, label: str) -> str:
+    """No-LLM digest: timeline of every session + cross-session activity.
+    The --llm variant distills decisions/conventions; this is the honest,
+    free fallback and the skeleton both share."""
+    parsed_list = sorted(parsed_list,
+                         key=lambda p: p["meta"]["first_ts"] or "")
+    shown = parsed_list[-TIMELINE_CAP:]
+    first = min((p["meta"]["first_ts"] or "9999" for p in parsed_list))
+    last = max((p["meta"]["last_ts"] or "" for p in parsed_list))
+    out = [f"# Project brief: {label}", "",
+           f"_Distilled from {len(parsed_list)} sessions, "
+           f"{fmt_ts(first)} → {fmt_ts(last)} — by claude-handoff. "
+           f"Citations are session ids (`--name ID` opens one)._", "",
+           "## Session timeline", ""]
+    if len(parsed_list) > len(shown):
+        out.append(f"_{len(parsed_list) - len(shown)} earlier "
+                   f"session(s) omitted — chf --list for all._")
+        out.append("")
+    out += [_session_line(p) for p in shown]
+    rollup = _activity_rollup(parsed_list)
+    if rollup:
+        out += ["", "## Most-touched files", ""]
+        out += [f"- `{f}`" + (f" ({n}× edits)" if n > 1 else "")
+                for f, n in rollup]
+    return "\n".join(out) + "\n"
+
+
+SESSION_NOTE_PROMPT = """\
+You are distilling ONE Claude Code working session into compact notes for
+a long-term project memory. Write terse bullets under these headings,
+skipping any heading the session has nothing for:
+
+## Decisions
+## Fixed
+## Conventions
+## Open threads
+
+Rules: only what the transcript actually shows — never invent or
+embellish; end every bullet with the session citation `[{sid}]`; at most
+200 words total; answer in the language the user wrote in.
+
+SESSION {sid} ({when}):
+{transcript}
+"""
+
+BRIEF_PROMPT = """\
+You are composing the persistent memory brief of the project "{label}"
+from per-session notes. Merge duplicates; when notes conflict, the later
+session wins. Organize under exactly these headings:
+
+## Decisions
+## Fixed
+## Conventions
+## Open threads
+
+Rules: keep the session citations like [abc123] on every bullet; never
+invent anything not present in the notes; at most 600 words total; answer
+in the language the notes are written in.
+{focus}
+NOTES (oldest session first):
+{notes}
+"""
+
+NOTE_INPUT_CAP = 120_000     # per-session transcript budget for one note
+BRIEF_NOTES_CAP = 200_000    # reduce-pass budget for notes (never the rules)
+
+
+def _sid(parsed: dict) -> str:
+    return (parsed["meta"]["session_id"] or "?")[:8]
+
+
+def _session_note(parsed: dict, provider: str, model: str | None,
+                  redact: bool, use_cache: bool) -> str:
+    """One cached, retried LLM note for one session. The cache key hashes
+    prompt+transcript, so prompt changes or session growth re-note only
+    what actually changed — that is what makes --brief refreshes cheap."""
+    transcript = (render_activity(parsed) + "\n\n"
+                  + render_transcript(parsed, include_tools=True,
+                                      max_chars=NOTE_INPUT_CAP))
+    if redact:
+        transcript, _ = redact_secrets(transcript)
+    prompt = SESSION_NOTE_PROMPT.format(
+        sid=_sid(parsed), when=fmt_ts(parsed["meta"]["first_ts"]),
+        transcript=transcript)
+    cfg, key, model = _resolve_provider(provider, model)
+    cache = _chunk_cache_path(prompt, provider, model) if use_cache else None
+    if cache is not None:
+        hit = _cache_get(cache)
+        if hit is not None:
+            return hit
+    note = _call_with_retry(cfg["call"], key, model, prompt)
+    if cache is not None:
+        _cache_put(cache, note)
+    return note
+
+
+def _map_notes(parsed_list: list, provider: str, model: str | None,
+               redact: bool, use_cache: bool) -> list:
+    """A note per session — sequential for SERIAL_PROVIDERS, fanned out
+    for API providers (same split as the chunk pipeline)."""
+    notes: list = [None] * len(parsed_list)
+    done = [0]
+
+    def work(i: int) -> None:
+        notes[i] = _session_note(parsed_list[i], provider, model,
+                                 redact, use_cache)
+        done[0] += 1
+        print(f"brief note {done[0]}/{len(parsed_list)} "
+              f"({_sid(parsed_list[i])})", file=sys.stderr)
+
+    if provider in SERIAL_PROVIDERS:
+        for i in range(len(parsed_list)):
+            work(i)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=PARALLEL_WORKERS) as ex:
+            list(ex.map(work, range(len(parsed_list))))
+    return notes
+
+
+def build_brief_llm(parsed_list: list, label: str, provider: str,
+                    model: str | None, focus: str | None = None,
+                    redact: bool = True, use_cache: bool = True) -> str:
+    """Deterministic skeleton + LLM-distilled memory sections."""
+    notes = _map_notes(parsed_list, provider, model, redact, use_cache)
+    joined = "\n\n".join(f"--- session {_sid(p)} ---\n{n}"
+                         for p, n in zip(parsed_list, notes))
+    focus_line = (f"\nAdditional instructions from the user — follow them "
+                  f"as well:\n{focus.strip()}\n" if focus else "")
+    prompt = BRIEF_PROMPT.format(label=label, focus=focus_line,
+                                 notes=truncate(joined, BRIEF_NOTES_CAP))
+    cfg, key, model = _resolve_provider(provider, model)
+    distilled = _call_with_retry(cfg["call"], key, model, prompt)
+    return (build_brief_deterministic(parsed_list, label)
+            + "\n## Distilled memory\n\n" + distilled.strip() + "\n")
+
+
+TIMELINE_CAP = 20            # timeline bullets injected per session start
+
+STAMP_RE = re.compile(
+    r"<!-- claude-handoff-brief v=1 built=(\d+) sessions=(\d+) "
+    r"newest_mtime=(\d+) distilled=(\d+) distilled_sessions=(\d+) "
+    r"provider=(\S+) -->")
+DISTILLED_MARK = "\n## Distilled memory\n"
+_FRESHNESS_NOTE_RE = re.compile(
+    r"\n_\d+ newer session\(s\) since this distillation[^\n]*_\n")
+
+
+def make_stamp(sessions: int, newest_mtime: int, distilled: int,
+               distilled_sessions: int, provider: str,
+               now: int | None = None) -> str:
+    """Machine-readable freshness marker embedded in the brief file —
+    what the SessionStart/SessionEnd hooks use to reason about staleness."""
+    built = int(time.time()) if now is None else int(now)
+    return (f"<!-- claude-handoff-brief v=1 built={built} "
+            f"sessions={sessions} newest_mtime={int(newest_mtime)} "
+            f"distilled={int(distilled)} "
+            f"distilled_sessions={int(distilled_sessions)} "
+            f"provider={provider} -->")
+
+
+def parse_stamp(text: str) -> dict | None:
+    m = STAMP_RE.search(text)
+    if not m:
+        return None
+    built, sessions, newest, dist, dsess = (int(g) for g in m.groups()[:5])
+    return {"built": built, "sessions": sessions, "newest_mtime": newest,
+            "distilled": dist, "distilled_sessions": dsess,
+            "provider": m.group(6)}
+
+
+def brief_label(parsed_list: list, scope: str) -> str:
+    """Human title: the real cwd when sessions carry one, else decoded."""
+    return next((p["meta"]["cwd"] for p in parsed_list if p["meta"]["cwd"]),
+                scope.lstrip("-").replace("-", "/"))
+
+
+def load_project_sessions(project: str) -> tuple:
+    """(parsed sessions oldest-first minus trivial ones, newest mtime)."""
+    sessions = find_sessions(project)
+    parsed_list = [p for p in (parse_session(s) for s in reversed(sessions))
+                   if p["turns"] and not looks_trivial(p)]
+    newest = max((s.stat().st_mtime for s in sessions), default=0)
+    return parsed_list, int(newest)
+
+
+def split_distilled(text: str) -> str | None:
+    """The distilled section (marker included) of an existing brief."""
+    idx = text.find(DISTILLED_MARK)
+    return text[idx:] if idx >= 0 else None
+
+
+def update_brief_skeleton(project: str) -> bool:
+    """SessionEnd refresh: rebuild the factual skeleton of an EXISTING
+    stamped brief, preserving the distilled section with a freshness note.
+    Touches nothing (returns False) for missing or unstamped files and
+    empty projects — the hook must never create surprises, and building a
+    brief is always an explicit user command."""
+    path = brief_path(project)
+    if not path.is_file():
+        return False
+    old = path.read_text(encoding="utf-8")
+    stamp = parse_stamp(old)
+    if stamp is None:
+        return False
+    parsed_list, newest = load_project_sessions(project)
+    if not parsed_list:
+        return False
+    doc = build_brief_deterministic(parsed_list,
+                                    brief_label(parsed_list, project))
+    distilled = split_distilled(old)
+    if distilled is not None:
+        distilled = _FRESHNESS_NOTE_RE.sub("\n", distilled)
+        newer = len(parsed_list) - stamp["distilled_sessions"]
+        if stamp["distilled"] and newer > 0:
+            note = (f"\n_{newer} newer session(s) since this distillation "
+                    f"— refresh with `chf --brief --llm "
+                    f"{stamp['provider']}`._\n")
+            distilled = distilled.replace(DISTILLED_MARK,
+                                          DISTILLED_MARK + note, 1)
+        doc = doc + distilled
+    new_stamp = make_stamp(len(parsed_list), newest, stamp["distilled"],
+                           stamp["distilled_sessions"], stamp["provider"])
+    path.write_text(new_stamp + "\n" + doc, encoding="utf-8")
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -1891,10 +2164,10 @@ HANDOFFS_DIR = Path(os.environ.get("CLAUDE_HOME",
                                    str(Path.home() / ".claude"))) / "handoffs"
 
 
-def install_hook(settings_path: Path | None = None,
-                 remove: bool = False) -> None:
-    """Add (or remove) a SessionEnd hook in Claude Code's settings.json so
-    every session leaves a handoff in ~/.claude/handoffs automatically."""
+def _edit_hook_settings(event: str, command: str, matcher: str | None,
+                        settings_path: Path | None, remove: bool) -> tuple:
+    """Shared add/remove of one of our hook commands in settings.json —
+    existing settings always preserved, malformed ones never clobbered."""
     settings_path = settings_path or (
         Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
         / "settings.json")
@@ -1907,18 +2180,18 @@ def install_hook(settings_path: Path | None = None,
                 f"{settings_path} is not valid JSON ({e}) — fix it first; "
                 f"refusing to overwrite it.") from e
     hooks = settings.setdefault("hooks", {})
-    entries = hooks.setdefault("SessionEnd", [])
+    entries = hooks.setdefault(event, [])
 
     def _is_ours(h: dict) -> bool:
-        return h.get("command") == HOOK_COMMAND
+        return h.get("command") == command
 
     if remove:
         for entry in entries:
             entry["hooks"] = [h for h in entry.get("hooks", [])
                               if not _is_ours(h)]
-        hooks["SessionEnd"] = [e for e in entries if e.get("hooks")]
-        if not hooks["SessionEnd"]:
-            del hooks["SessionEnd"]
+        hooks[event] = [e for e in entries if e.get("hooks")]
+        if not hooks[event]:
+            del hooks[event]
         if not hooks:
             del settings["hooks"]
         action = "removed from"
@@ -1926,13 +2199,25 @@ def install_hook(settings_path: Path | None = None,
         present = any(_is_ours(h) for e in entries
                       for h in e.get("hooks", []))
         if not present:
-            entries.append({"hooks": [{"type": "command",
-                                       "command": HOOK_COMMAND}]})
+            entry: dict = {"hooks": [{"type": "command",
+                                      "command": command}]}
+            if matcher:
+                entry["matcher"] = matcher
+            entries.append(entry)
         action = "installed in"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings, indent=2,
                                         ensure_ascii=False) + "\n",
                              encoding="utf-8")
+    return settings_path, action
+
+
+def install_hook(settings_path: Path | None = None,
+                 remove: bool = False) -> None:
+    """Add (or remove) a SessionEnd hook in Claude Code settings.json so
+    every session leaves a handoff in ~/.claude/handoffs automatically."""
+    settings_path, action = _edit_hook_settings(
+        "SessionEnd", HOOK_COMMAND, None, settings_path, remove)
     print(f"Auto-handoff hook {action} {settings_path}.", file=sys.stderr)
     if not remove:
         print(f"Every Claude Code session now writes a handoff to "
@@ -1958,6 +2243,73 @@ def run_hook_mode() -> None:
             parsed, transcript, include_tools=False,
             max_chars=DEFAULT_MAX_CHARS), hint=False), encoding="utf-8")
         print(f"handoff written: {out}")
+    except Exception:  # deliberately swallow: see docstring
+        return
+
+
+
+
+BRIEF_HOOK_COMMAND = "claude-handoff --brief-hook-stdin"
+BRIEF_UPDATE_COMMAND = "claude-handoff --brief-update-stdin"
+
+
+def install_brief_hook(settings_path: Path | None = None,
+                       remove: bool = False) -> None:
+    """Add (or remove) a SessionStart hook that injects the project brief
+    (~/.claude/briefs/<project>.md) as context into every new session —
+    long-term project memory, fully local."""
+    settings_path, action = _edit_hook_settings(
+        "SessionStart", BRIEF_HOOK_COMMAND,
+        "startup|resume|clear|compact", settings_path, remove)
+    _edit_hook_settings("SessionEnd", BRIEF_UPDATE_COMMAND, None,
+                        settings_path, remove)
+    print(f"Project-memory hook {action} {settings_path}.",
+          file=sys.stderr)
+    if not remove:
+        print("New sessions now start with the project brief as context — "
+              "refresh it anytime with `chf --brief` (--llm for a "
+              "distilled one).", file=sys.stderr)
+
+
+def run_brief_hook_mode() -> None:
+    """SessionStart hook entrypoint: print the project brief to stdout —
+    Claude Code adds plain stdout as session context. Silent on any
+    problem: a hook must never break the host session."""
+    try:
+        payload = json.load(sys.stdin)
+        project = cwd_project_filter(Path(payload["cwd"]))
+        if not project:
+            return
+        path = brief_path(project)
+        if not path.is_file():
+            return
+        text = path.read_text(encoding="utf-8")
+        stamp = parse_stamp(text)
+        warn = ""
+        if stamp:
+            newest = max((s.stat().st_mtime
+                          for s in find_sessions(project)), default=0)
+            if newest > stamp["newest_mtime"]:
+                warn = ("\n(warning: sessions newer than this brief "
+                        "exist — refresh with `chf --brief`)\n")
+        sys.stdout.write(
+            '<project-memory source="claude-handoff" '
+            'refresh="chf --brief">\n'
+            + text + warn + "\n</project-memory>\n")
+    except Exception:  # deliberately swallow: see docstring
+        return
+
+
+
+def run_brief_update_mode() -> None:
+    """SessionEnd hook entrypoint: refresh the factual skeleton of an
+    existing brief (never an LLM call, never creates files). Silent on
+    any problem — a hook must never break the host session."""
+    try:
+        payload = json.load(sys.stdin)
+        project = cwd_project_filter(Path(payload["cwd"]))
+        if project:
+            update_brief_skeleton(project)
     except Exception:  # deliberately swallow: see docstring
         return
 
@@ -2016,6 +2368,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "to show all matches)")
     ap.add_argument("--project", metavar="NAME",
                     help="pick latest session whose project path contains NAME")
+    ap.add_argument("--brief", action="store_true",
+                    help="distill EVERY session of the project into one "
+                         "memory brief (~/.claude/briefs/<project>.md); "
+                         "deterministic timeline by default, real "
+                         "distillation with --llm")
     ap.add_argument("--merge", action="store_true",
                     help="merge every session in scope (project / cwd / "
                          "--name match) into ONE handoff, oldest first")
@@ -2038,6 +2395,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "session end) or an ISO timestamp")
     ap.add_argument("-i", "--interactive", action="store_true",
                     help="pick the session from a numbered list")
+    ap.add_argument("--install-brief-hook", action="store_true",
+                    help="inject the project brief as context into "
+                         "every new Claude Code session (SessionStart "
+                         "hook) — long-term project memory")
+    ap.add_argument("--uninstall-brief-hook", action="store_true",
+                    help="remove the project-memory hook")
+    ap.add_argument("--brief-hook-stdin", action="store_true",
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--brief-update-stdin", action="store_true",
+                    help=argparse.SUPPRESS)
     ap.add_argument("--install-hook", action="store_true",
                     help="auto-write a handoff when every Claude Code "
                          "session ends (SessionEnd hook)")
@@ -2267,6 +2634,51 @@ def _load_config() -> dict:
     return cfg
 
 
+def _run_brief(args: argparse.Namespace) -> None:
+    """--brief: whole-project memory document (see brief.py)."""
+    scope = args.project
+    if not scope and not args.any:
+        scope = cwd_project_filter()
+    if not scope:
+        raise SystemExit("--brief needs a project: run it inside one, "
+                         "or pass --project NAME.")
+    parsed_list, newest_mtime = load_project_sessions(scope)
+    if not parsed_list:
+        raise SystemExit(f"No sessions to brief for {scope!r} — "
+                         f"run --list.")
+    label = brief_label(parsed_list, scope)
+    if args.llm:
+        doc = build_brief_llm(parsed_list, label, args.llm,
+                              args.model, focus=args.focus,
+                              redact=not args.no_redact,
+                              use_cache=not args.no_cache)
+    else:
+        doc = build_brief_deterministic(parsed_list, label)
+    if not args.no_redact:
+        doc = redact_doc(doc)
+    if getattr(args, "anonymize", False):
+        doc, _ = anonymize_text(doc)
+    if args.llm:
+        stamp = make_stamp(len(parsed_list), newest_mtime,
+                           distilled=int(time.time()),
+                           distilled_sessions=len(parsed_list),
+                           provider=args.llm)
+    else:
+        stamp = make_stamp(len(parsed_list), newest_mtime, 0, 0,
+                           "none")
+    doc = stamp + "\n" + doc
+    dest = (brief_path(scope) if args.output == "handoff.md"
+            else args.output)
+    if str(dest) == "-":
+        sys.stdout.write(doc)
+        return
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(doc, encoding="utf-8")
+    print(f"Wrote brief {dest} ({len(parsed_list)} sessions, "
+          f"\u2248{_fmt_tokens(len(doc) // 4)} tokens)", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_arg_parser()
     parser.set_defaults(**_load_config())
@@ -2284,6 +2696,15 @@ def main(argv: list[str] | None = None) -> None:
     if args.hook_stdin:
         run_hook_mode()
         return
+    if args.brief_hook_stdin:
+        run_brief_hook_mode()
+        return
+    if args.brief_update_stdin:
+        run_brief_update_mode()
+        return
+    if args.install_brief_hook or args.uninstall_brief_hook:
+        install_brief_hook(remove=args.uninstall_brief_hook)
+        return
     if args.install_hook or args.uninstall_hook:
         install_hook(remove=args.uninstall_hook)
         return
@@ -2293,6 +2714,9 @@ def main(argv: list[str] | None = None) -> None:
         else:
             list_sessions(args.project, grep=args.grep,
                           as_json=args.format == "json")
+        return
+    if args.brief:
+        _run_brief(args)
         return
     picked: list = []
     if args.interactive and not args.merge:

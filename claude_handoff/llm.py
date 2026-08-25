@@ -330,14 +330,10 @@ def _chunk_text(text: str, cap: int) -> list[str]:
     return chunks
 
 
-def llm_summarize(provider: str, model: str | None, transcript: str,
-                  focus: str | None = None, use_cache: bool = True) -> str:
-    """Summarize a transcript with the provider's call strategy.
-
-    Transcripts beyond LLM_INPUT_CAP are map-reduced: per-chunk notes
-    first (cached, retried), then one synthesis pass — nothing is
-    silently dropped. `focus` carries extra user instructions.
-    """
+def _resolve_provider(provider: str, model: str | None) -> tuple:
+    """Registry lookup + key/model resolution shared by every LLM
+    entry point; exits naming the accepted env vars when a key is
+    missing."""
     cfg = PROVIDERS.get(provider)
     if cfg is None:
         raise SystemExit(f"Unknown provider: {provider}. "
@@ -346,7 +342,18 @@ def llm_summarize(provider: str, model: str | None, transcript: str,
     if cfg["env_keys"] and not key:
         accepted = " or ".join(cfg["env_keys"])
         raise SystemExit(f"Set {accepted} to use --llm {provider}")
-    model = model or cfg["default_model"]
+    return cfg, key, model or cfg["default_model"]
+
+
+def llm_summarize(provider: str, model: str | None, transcript: str,
+                  focus: str | None = None, use_cache: bool = True) -> str:
+    """Summarize a transcript with the provider's call strategy.
+
+    Transcripts beyond LLM_INPUT_CAP are map-reduced: per-chunk notes
+    first (cached, retried), then one synthesis pass — nothing is
+    silently dropped. `focus` carries extra user instructions.
+    """
+    cfg, key, model = _resolve_provider(provider, model)
     extra = ("\nAdditional instructions from the user — follow them as "
              f"well:\n{focus.strip()}\n" if focus else "")
 

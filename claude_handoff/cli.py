@@ -6,9 +6,18 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from ._version import __version__
+from .brief import (
+    brief_label,
+    brief_path,
+    build_brief_deterministic,
+    build_brief_llm,
+    load_project_sessions,
+    make_stamp,
+)
 from .discovery import (
     PROJECTS_DIR,
     _newest_meaningful_session,
@@ -20,7 +29,15 @@ from .discovery import (
     interactive_pick,
     list_sessions,
 )
-from .integrations import _copy_clipboard, install_hook, run_hook_mode, run_mcp_server
+from .integrations import (
+    _copy_clipboard,
+    install_brief_hook,
+    install_hook,
+    run_brief_hook_mode,
+    run_brief_update_mode,
+    run_hook_mode,
+    run_mcp_server,
+)
 from .llm import CACHE_DIR, PROVIDERS, build_llm, llm_summarize
 from .parse import looks_trivial, merge_parsed, parse_session, slice_turns
 from .redact import anonymize_text, redact_doc, redact_secrets
@@ -87,6 +104,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "to show all matches)")
     ap.add_argument("--project", metavar="NAME",
                     help="pick latest session whose project path contains NAME")
+    ap.add_argument("--brief", action="store_true",
+                    help="distill EVERY session of the project into one "
+                         "memory brief (~/.claude/briefs/<project>.md); "
+                         "deterministic timeline by default, real "
+                         "distillation with --llm")
     ap.add_argument("--merge", action="store_true",
                     help="merge every session in scope (project / cwd / "
                          "--name match) into ONE handoff, oldest first")
@@ -109,6 +131,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "session end) or an ISO timestamp")
     ap.add_argument("-i", "--interactive", action="store_true",
                     help="pick the session from a numbered list")
+    ap.add_argument("--install-brief-hook", action="store_true",
+                    help="inject the project brief as context into "
+                         "every new Claude Code session (SessionStart "
+                         "hook) — long-term project memory")
+    ap.add_argument("--uninstall-brief-hook", action="store_true",
+                    help="remove the project-memory hook")
+    ap.add_argument("--brief-hook-stdin", action="store_true",
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--brief-update-stdin", action="store_true",
+                    help=argparse.SUPPRESS)
     ap.add_argument("--install-hook", action="store_true",
                     help="auto-write a handoff when every Claude Code "
                          "session ends (SessionEnd hook)")
@@ -338,6 +370,51 @@ def _load_config() -> dict:
     return cfg
 
 
+def _run_brief(args: argparse.Namespace) -> None:
+    """--brief: whole-project memory document (see brief.py)."""
+    scope = args.project
+    if not scope and not args.any:
+        scope = cwd_project_filter()
+    if not scope:
+        raise SystemExit("--brief needs a project: run it inside one, "
+                         "or pass --project NAME.")
+    parsed_list, newest_mtime = load_project_sessions(scope)
+    if not parsed_list:
+        raise SystemExit(f"No sessions to brief for {scope!r} — "
+                         f"run --list.")
+    label = brief_label(parsed_list, scope)
+    if args.llm:
+        doc = build_brief_llm(parsed_list, label, args.llm,
+                              args.model, focus=args.focus,
+                              redact=not args.no_redact,
+                              use_cache=not args.no_cache)
+    else:
+        doc = build_brief_deterministic(parsed_list, label)
+    if not args.no_redact:
+        doc = redact_doc(doc)
+    if getattr(args, "anonymize", False):
+        doc, _ = anonymize_text(doc)
+    if args.llm:
+        stamp = make_stamp(len(parsed_list), newest_mtime,
+                           distilled=int(time.time()),
+                           distilled_sessions=len(parsed_list),
+                           provider=args.llm)
+    else:
+        stamp = make_stamp(len(parsed_list), newest_mtime, 0, 0,
+                           "none")
+    doc = stamp + "\n" + doc
+    dest = (brief_path(scope) if args.output == "handoff.md"
+            else args.output)
+    if str(dest) == "-":
+        sys.stdout.write(doc)
+        return
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(doc, encoding="utf-8")
+    print(f"Wrote brief {dest} ({len(parsed_list)} sessions, "
+          f"\u2248{_fmt_tokens(len(doc) // 4)} tokens)", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_arg_parser()
     parser.set_defaults(**_load_config())
@@ -355,6 +432,15 @@ def main(argv: list[str] | None = None) -> None:
     if args.hook_stdin:
         run_hook_mode()
         return
+    if args.brief_hook_stdin:
+        run_brief_hook_mode()
+        return
+    if args.brief_update_stdin:
+        run_brief_update_mode()
+        return
+    if args.install_brief_hook or args.uninstall_brief_hook:
+        install_brief_hook(remove=args.uninstall_brief_hook)
+        return
     if args.install_hook or args.uninstall_hook:
         install_hook(remove=args.uninstall_hook)
         return
@@ -364,6 +450,9 @@ def main(argv: list[str] | None = None) -> None:
         else:
             list_sessions(args.project, grep=args.grep,
                           as_json=args.format == "json")
+        return
+    if args.brief:
+        _run_brief(args)
         return
     picked: list = []
     if args.interactive and not args.merge:

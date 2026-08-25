@@ -1111,6 +1111,340 @@ class RedactOutputTests(unittest.TestCase):
             self.assertIn("[REDACTED]", text)
 
 
+class BriefTests(unittest.TestCase):
+    """--brief: distill a project's whole history into one memory doc."""
+
+    def test_deterministic_brief_content(self):
+        import contextlib
+        import io
+        parsed_list = [ch.parse_session(COMPACTED), ch.parse_session(FIXTURE)]
+        with contextlib.redirect_stderr(io.StringIO()):
+            doc = ch.build_brief_deterministic(parsed_list, "home/vspapg/myapp")
+        self.assertIn("# Project brief: home/vspapg/myapp", doc)
+        self.assertIn("2 sessions", doc)
+        self.assertIn("Fix login bug in auth.py", doc)    # FIXTURE title
+        self.assertIn("auth.py", doc)                     # activity rollup
+        self.assertIn("abc123"[:8], doc)                  # session citation
+
+    def test_timeline_sorted_by_start_time_not_input_order(self):
+        import contextlib
+        import io
+        a, b = ch.parse_session(FIXTURE), ch.parse_session(COMPACTED)
+        with contextlib.redirect_stderr(io.StringIO()):
+            doc = ch.build_brief_deterministic([a, b], "x")
+            doc2 = ch.build_brief_deterministic([b, a], "x")
+        self.assertEqual(doc, doc2)                # input order irrelevant
+
+    def test_brief_cli_writes_to_briefs_dir(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with unittest.mock.patch.object(
+                    ch.brief, "find_sessions",
+                    lambda *a, **k: [FIXTURE, AGENT_SESSION]), \
+                    unittest.mock.patch.object(
+                        ch.cli, "cwd_project_filter",
+                        lambda *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                               Path(td)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.main(["--brief"])
+            out = Path(td) / "-home-vspapg-myapp.md"
+            self.assertTrue(out.exists())
+            text = out.read_text(encoding="utf-8")
+            self.assertIn("# Project brief", text)
+            stamp = ch.brief.parse_stamp(text)      # stamped at write time
+            self.assertIsNotNone(stamp)
+            self.assertEqual(stamp["provider"], "none")
+
+    def test_brief_requires_project_scope(self):
+        with unittest.mock.patch.object(ch.cli, "cwd_project_filter",
+                                        lambda *a, **k: None):
+            with self.assertRaises(SystemExit) as cm:
+                ch.main(["--brief"])
+        self.assertIn("--project", str(cm.exception))
+
+    def _fake_provider(self, calls):
+        def fake_call(key, model, prompt):
+            calls.append(prompt)
+            return f"NOTE{len(calls)}: decisions here"
+        return unittest.mock.patch.dict(ch.PROVIDERS["claude-cli"],
+                                        {"call": fake_call})
+
+    def test_llm_brief_maps_each_session_then_reduces(self):
+        import contextlib
+        import io
+        calls = []
+        parsed_list = [ch.parse_session(COMPACTED), ch.parse_session(FIXTURE)]
+        with self._fake_provider(calls), \
+                contextlib.redirect_stderr(io.StringIO()):
+            doc = ch.build_brief_llm(parsed_list, "home/vspapg/myapp",
+                                     "claude-cli", None, use_cache=False)
+        self.assertEqual(len(calls), 3)            # 2 session notes + reduce
+        self.assertIn("abc123", calls[1])          # note prompt cites its id
+        self.assertIn("NOTE1", calls[-1])          # reduce sees the notes
+        self.assertIn("# Project brief: home/vspapg/myapp", doc)
+        self.assertIn("## Session timeline", doc)  # factual skeleton kept
+        self.assertIn("NOTE3", doc)                # reduce output appended
+
+    def test_llm_brief_notes_cached_incrementally(self):
+        import contextlib
+        import io
+        import tempfile
+        calls = []
+        parsed_list = [ch.parse_session(COMPACTED), ch.parse_session(FIXTURE)]
+        with tempfile.TemporaryDirectory() as td, \
+                self._fake_provider(calls), \
+                unittest.mock.patch.object(ch.llm, "CACHE_DIR", Path(td)), \
+                contextlib.redirect_stderr(io.StringIO()):
+            ch.build_brief_llm(parsed_list, "x", "claude-cli", None)
+            first = len(calls)
+            ch.build_brief_llm(parsed_list, "x", "claude-cli", None)
+            second = len(calls) - first
+        self.assertEqual(first, 3)
+        self.assertEqual(second, 1)                # only the reduce re-runs
+
+    def test_cli_brief_llm_writes_distillation(self):
+        import contextlib
+        import io
+        import tempfile
+        calls = []
+        with tempfile.TemporaryDirectory() as td, \
+                self._fake_provider(calls), \
+                unittest.mock.patch.object(
+                    ch.brief, "find_sessions",
+                    lambda *a, **k: [FIXTURE]), \
+                unittest.mock.patch.object(
+                    ch.cli, "cwd_project_filter",
+                    lambda *a, **k: "-home-vspapg-myapp"), \
+                unittest.mock.patch.object(ch.brief, "BRIEFS_DIR", Path(td)), \
+                contextlib.redirect_stderr(io.StringIO()):
+            ch.main(["--brief", "--llm", "claude-cli", "--no-cache"])
+            text = (Path(td) / "-home-vspapg-myapp.md") \
+                .read_text(encoding="utf-8")
+        self.assertIn("decisions here", text)
+
+    def test_brief_to_stdout(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with unittest.mock.patch.object(
+                ch.brief, "find_sessions",
+                lambda *a, **k: [FIXTURE]), \
+                unittest.mock.patch.object(
+                    ch.cli, "cwd_project_filter",
+                    lambda *a, **k: "-home-vspapg-myapp"), \
+                contextlib.redirect_stdout(buf), \
+                contextlib.redirect_stderr(io.StringIO()):
+            ch.main(["--brief", "-o", "-"])
+        self.assertIn("# Project brief", buf.getvalue())
+
+
+def _synth_parsed(i: int) -> dict:
+    """Minimal parsed-session dict for volume tests."""
+    p = ch._new_parse_state()
+    p["meta"].update(session_id=f"synth{i:03d}",
+                     first_ts=f"2026-07-{(i % 28) + 1:02d}T10:00:00Z",
+                     last_ts=f"2026-07-{(i % 28) + 1:02d}T11:00:00Z",
+                     n_user=1, summaries=[f"synthetic session {i}"])
+    p["turns"] = [{"role": "user", "text_parts": [f"work {i}"],
+                   "tools": [], "ts": None}]
+    for k in [k for k in p if k.startswith("_")]:
+        p.pop(k)
+    return p
+
+
+class BriefFreshnessTests(unittest.TestCase):
+    """Stamps, timeline caps, and the SessionEnd auto-update policy."""
+
+    def test_timeline_caps_at_20_sessions(self):
+        import contextlib
+        import io
+        parsed_list = [_synth_parsed(i) for i in range(25)]
+        with contextlib.redirect_stderr(io.StringIO()):
+            doc = ch.build_brief_deterministic(parsed_list, "x")
+        self.assertEqual(doc.count("`synth"), 20)         # capped bullets
+        self.assertIn("5 earlier session(s) omitted", doc)
+        self.assertIn("synth024", doc)                    # newest kept
+
+    def test_stamp_roundtrip(self):
+        stamp = ch.brief.make_stamp(sessions=5, newest_mtime=1000,
+                                    distilled=900, distilled_sessions=4,
+                                    provider="claude-cli", now=1234)
+        meta = ch.brief.parse_stamp("x\n" + stamp + "\ny")
+        self.assertEqual(meta, {"built": 1234, "sessions": 5,
+                                "newest_mtime": 1000, "distilled": 900,
+                                "distilled_sessions": 4,
+                                "provider": "claude-cli"})
+        self.assertIsNone(ch.brief.parse_stamp("no stamp here"))
+
+    def test_update_refreshes_skeleton_keeps_distilled_with_note(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            old = ("<!-- claude-handoff-brief v=1 built=10 sessions=1 "
+                   "newest_mtime=10 distilled=10 distilled_sessions=1 "
+                   "provider=claude-cli -->\n"
+                   "# Project brief: old\n\n## Session timeline\n\n- old\n\n"
+                   "## Distilled memory\n\n- Redis for drafts [abc123]\n")
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                old, encoding="utf-8")
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.brief, "find_sessions",
+                        lambda *a, **k: [FIXTURE, AGENT_SESSION]), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                changed = ch.brief.update_brief_skeleton("-home-vspapg-myapp")
+            text = (Path(td) / "-home-vspapg-myapp.md") \
+                .read_text(encoding="utf-8")
+        self.assertTrue(changed)
+        self.assertIn("Fix login bug in auth.py", text)   # fresh timeline
+        self.assertIn("- Redis for drafts [abc123]", text)  # distilled kept
+        self.assertIn("newer session(s) since this distillation", text)
+        self.assertIn("claude-handoff-brief v=1", text)   # re-stamped
+
+    def test_update_leaves_unknown_files_alone(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "-p.md"
+            target.write_text("hand-written notes, no stamp",
+                              encoding="utf-8")
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)):
+                self.assertFalse(ch.brief.update_brief_skeleton("-p"))
+            self.assertEqual(target.read_text(encoding="utf-8"),
+                             "hand-written notes, no stamp")
+
+    def test_update_without_existing_brief_is_noop(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)):
+                self.assertFalse(ch.brief.update_brief_skeleton("-none"))
+            self.assertEqual(list(Path(td).iterdir()), [])
+
+
+class BriefHookTests(unittest.TestCase):
+    """SessionStart hook: inject the project brief as session context."""
+
+    def test_install_is_idempotent_and_removable(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            sp = Path(td) / "settings.json"
+            sp.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                ch.install_brief_hook(settings_path=sp)
+                ch.install_brief_hook(settings_path=sp)      # idempotent
+            data = json.loads(sp.read_text(encoding="utf-8"))
+            self.assertEqual(data["model"], "opus")          # untouched
+            entries = data["hooks"]["SessionStart"]
+            cmds = [h["command"] for e in entries for h in e["hooks"]]
+            self.assertEqual(cmds.count(ch.BRIEF_HOOK_COMMAND), 1)
+            self.assertIn("startup", entries[0]["matcher"])
+            end_cmds = [h["command"]
+                        for e in data["hooks"]["SessionEnd"]
+                        for h in e["hooks"]]
+            self.assertEqual(end_cmds.count(ch.BRIEF_UPDATE_COMMAND), 1)
+            with contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                ch.install_brief_hook(settings_path=sp, remove=True)
+            data = json.loads(sp.read_text(encoding="utf-8"))
+            self.assertNotIn("SessionStart", data.get("hooks", {}))
+            self.assertNotIn("SessionEnd", data.get("hooks", {}))
+
+    def test_update_mode_calls_skeleton_refresh(self):
+        import contextlib
+        import io
+        seen = []
+        payload = json.dumps({"cwd": "/home/vspapg/myapp"})
+        with unittest.mock.patch.object(
+                ch.integrations, "cwd_project_filter",
+                lambda cwd=None, *a, **k: "-home-vspapg-myapp"), \
+                unittest.mock.patch.object(ch.integrations,
+                                           "update_brief_skeleton",
+                                           seen.append), \
+                unittest.mock.patch.object(sys, "stdin",
+                                           io.StringIO(payload)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ch.run_brief_update_mode()
+        self.assertEqual(seen, ["-home-vspapg-myapp"])
+
+    def test_update_mode_swallows_errors(self):
+        import contextlib
+        import io
+        with unittest.mock.patch.object(sys, "stdin",
+                                        io.StringIO("{broken")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ch.run_brief_update_mode()             # must not raise
+
+    def test_injection_warns_when_brief_is_stale(self):
+        import contextlib
+        import io
+        import tempfile
+        payload = json.dumps({"cwd": "/home/vspapg/myapp"})
+        stale = (ch.brief.make_stamp(1, newest_mtime=10, distilled=0,
+                                     distilled_sessions=0, provider="none")
+                 + "\n# Project brief: x\n")
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                stale, encoding="utf-8")
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "cwd_project_filter",
+                        lambda cwd=None, *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "find_sessions",
+                        lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(sys, "stdin",
+                                               io.StringIO(payload)):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    ch.run_brief_hook_mode()
+        self.assertIn("newer than this brief", buf.getvalue())
+
+    def test_hook_stdin_emits_brief_as_context(self):
+        import contextlib
+        import io
+        import tempfile
+        payload = json.dumps({"cwd": "/home/vspapg/myapp",
+                              "hook_event_name": "SessionStart",
+                              "session_id": "s1"})
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                "# Project brief: myapp\n- Redis for drafts [abc123]\n",
+                encoding="utf-8")
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "cwd_project_filter",
+                        lambda cwd=None, *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(sys, "stdin",
+                                               io.StringIO(payload)), \
+                    contextlib.redirect_stdout(buf):
+                ch.run_brief_hook_mode()
+        out = buf.getvalue()
+        self.assertIn("Redis for drafts", out)
+        self.assertIn("chf --brief", out)          # refresh hint in banner
+
+    def test_hook_swallows_all_errors(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with unittest.mock.patch.object(sys, "stdin",
+                                        io.StringIO("{not json")), \
+                contextlib.redirect_stdout(buf):
+            ch.run_brief_hook_mode()               # must not raise
+        self.assertEqual(buf.getvalue(), "")
+
+
 class ConfigTests(unittest.TestCase):
     """~/.config/claude-handoff/config.json supplies defaults; flags win."""
 

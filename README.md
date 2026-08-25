@@ -16,6 +16,7 @@ Claude Code stores every session locally as JSONL (`~/.claude/projects/…/*.jso
 - **Deterministic by default.** No API call, no cost, works offline.
 - **`--llm` when you want a real summary.** Claude, OpenAI or Gemini via your own API key — or `--llm claude-cli`, which runs your locally-installed Claude Code CLI on your existing Pro/Max plan: **no API key at all**.
 - **Noise-free.** Drops tool results, thinking blocks, system reminders, subagent chatter, slash-command envelopes. Keeps user intent, assistant answers, files modified, commands run — including the files and commands of subagents (`agent-*.jsonl`), whose full transcripts stay behind `--include-sidechains`.
+- **Project memory.** `chf --brief` distills a project's ENTIRE session history into one living brief (decisions, fixes, conventions, open threads — with session citations); `--install-brief-hook` injects it into every new Claude Code session, so Claude starts already knowing the project.
 - **Safe to paste.** Secret-looking strings (API keys, tokens, `password=`…) are redacted from every output — the handoff you paste into a web chat is egress too. `--no-redact` opts out.
 
 ## Install
@@ -70,6 +71,10 @@ claude-handoff --anonymize
 # auto-handoff: write one for every session when it ends
 claude-handoff --install-hook
 
+# project memory: distill ALL sessions into one brief, inject at start
+chf --brief --llm claude-cli       # build/refresh ~/.claude/briefs/<project>.md
+chf --install-brief-hook           # every new session starts with it
+
 # real LLM summary (goal / decisions / current state / next steps):
 claude-handoff --llm claude-cli                 # uses your Claude Code login — no API key
 claude-handoff --llm ollama                     # local model — fully offline
@@ -80,6 +85,23 @@ claude-handoff --llm gemini --with-transcript   # summary + cleaned transcript
 ```
 
 Then paste `handoff.md` into any other model. The document opens with instructions to the receiving assistant, so no extra prompting is needed.
+
+## Project memory (`--brief`)
+
+Claude Code forgets everything between sessions — but the whole history
+is on your disk. `chf --brief` reads **every** session of the current
+project and writes one memory document: a factual session timeline +
+most-touched files (deterministic, free), and with `--llm` a distilled
+memory — decisions with their why, fixed bugs, conventions, open
+threads — every bullet cited with the session id it came from.
+Per-session notes are cached, so refreshing after new sessions only
+pays for the new ones. `chf --install-brief-hook` installs two hooks:
+SessionStart injects the brief as context (Claude starts already
+knowing your project), SessionEnd auto-refreshes the factual part —
+free, no LLM ever runs from a hook. The distilled part refreshes only
+when you say so; the brief carries a freshness stamp, and both the
+file and the injection warn when newer sessions exist. Fully local;
+redaction applies as everywhere.
 
 > Auto-selection skips nearly-empty sessions (like the stub `claude /login` leaves behind) so "latest" means your latest *real* conversation. An explicit path or `--name` always wins.
 
@@ -123,6 +145,8 @@ Found it — ascii encoding. Changed to utf-8, tests pass.
 | `-o clipboard` | copy the handoff straight to the clipboard |
 | `--include-sidechains` | append full subagent transcripts (inline sidechains and `<session-id>/subagents/agent-*.jsonl`); their file/command activity is always counted |
 | `-i` / `--interactive` | pick session(s) from a numbered list — `1,3` or `2-4` merges several into one handoff |
+| `--brief` | distill the project's whole history into `~/.claude/briefs/<project>.md` (deterministic; `--llm` for real distillation) |
+| `--install-brief-hook` / `--uninstall-brief-hook` | inject the brief as context into every new session (SessionStart hook) |
 | `--install-hook` / `--uninstall-hook` | auto-write a handoff to `~/.claude/handoffs/` when each session ends |
 | `--completions bash\|zsh` | print a tab-completion snippet |
 | `--mcp` | run as an MCP server over stdio |

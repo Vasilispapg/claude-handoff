@@ -10,8 +10,10 @@ from datetime import datetime
 from pathlib import Path
 
 from ._version import __version__
+from .brief import brief_path, parse_stamp, update_brief_skeleton
 from .discovery import (
     _newest_meaningful_session,
+    cwd_project_filter,
     find_session_by_name,
     find_sessions,
     session_label,
@@ -200,10 +202,10 @@ HANDOFFS_DIR = Path(os.environ.get("CLAUDE_HOME",
                                    str(Path.home() / ".claude"))) / "handoffs"
 
 
-def install_hook(settings_path: Path | None = None,
-                 remove: bool = False) -> None:
-    """Add (or remove) a SessionEnd hook in Claude Code's settings.json so
-    every session leaves a handoff in ~/.claude/handoffs automatically."""
+def _edit_hook_settings(event: str, command: str, matcher: str | None,
+                        settings_path: Path | None, remove: bool) -> tuple:
+    """Shared add/remove of one of our hook commands in settings.json —
+    existing settings always preserved, malformed ones never clobbered."""
     settings_path = settings_path or (
         Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
         / "settings.json")
@@ -216,18 +218,18 @@ def install_hook(settings_path: Path | None = None,
                 f"{settings_path} is not valid JSON ({e}) — fix it first; "
                 f"refusing to overwrite it.") from e
     hooks = settings.setdefault("hooks", {})
-    entries = hooks.setdefault("SessionEnd", [])
+    entries = hooks.setdefault(event, [])
 
     def _is_ours(h: dict) -> bool:
-        return h.get("command") == HOOK_COMMAND
+        return h.get("command") == command
 
     if remove:
         for entry in entries:
             entry["hooks"] = [h for h in entry.get("hooks", [])
                               if not _is_ours(h)]
-        hooks["SessionEnd"] = [e for e in entries if e.get("hooks")]
-        if not hooks["SessionEnd"]:
-            del hooks["SessionEnd"]
+        hooks[event] = [e for e in entries if e.get("hooks")]
+        if not hooks[event]:
+            del hooks[event]
         if not hooks:
             del settings["hooks"]
         action = "removed from"
@@ -235,13 +237,25 @@ def install_hook(settings_path: Path | None = None,
         present = any(_is_ours(h) for e in entries
                       for h in e.get("hooks", []))
         if not present:
-            entries.append({"hooks": [{"type": "command",
-                                       "command": HOOK_COMMAND}]})
+            entry: dict = {"hooks": [{"type": "command",
+                                      "command": command}]}
+            if matcher:
+                entry["matcher"] = matcher
+            entries.append(entry)
         action = "installed in"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings, indent=2,
                                         ensure_ascii=False) + "\n",
                              encoding="utf-8")
+    return settings_path, action
+
+
+def install_hook(settings_path: Path | None = None,
+                 remove: bool = False) -> None:
+    """Add (or remove) a SessionEnd hook in Claude Code settings.json so
+    every session leaves a handoff in ~/.claude/handoffs automatically."""
+    settings_path, action = _edit_hook_settings(
+        "SessionEnd", HOOK_COMMAND, None, settings_path, remove)
     print(f"Auto-handoff hook {action} {settings_path}.", file=sys.stderr)
     if not remove:
         print(f"Every Claude Code session now writes a handoff to "
@@ -271,3 +285,68 @@ def run_hook_mode() -> None:
         return
 
 
+
+
+BRIEF_HOOK_COMMAND = "claude-handoff --brief-hook-stdin"
+BRIEF_UPDATE_COMMAND = "claude-handoff --brief-update-stdin"
+
+
+def install_brief_hook(settings_path: Path | None = None,
+                       remove: bool = False) -> None:
+    """Add (or remove) a SessionStart hook that injects the project brief
+    (~/.claude/briefs/<project>.md) as context into every new session —
+    long-term project memory, fully local."""
+    settings_path, action = _edit_hook_settings(
+        "SessionStart", BRIEF_HOOK_COMMAND,
+        "startup|resume|clear|compact", settings_path, remove)
+    _edit_hook_settings("SessionEnd", BRIEF_UPDATE_COMMAND, None,
+                        settings_path, remove)
+    print(f"Project-memory hook {action} {settings_path}.",
+          file=sys.stderr)
+    if not remove:
+        print("New sessions now start with the project brief as context — "
+              "refresh it anytime with `chf --brief` (--llm for a "
+              "distilled one).", file=sys.stderr)
+
+
+def run_brief_hook_mode() -> None:
+    """SessionStart hook entrypoint: print the project brief to stdout —
+    Claude Code adds plain stdout as session context. Silent on any
+    problem: a hook must never break the host session."""
+    try:
+        payload = json.load(sys.stdin)
+        project = cwd_project_filter(Path(payload["cwd"]))
+        if not project:
+            return
+        path = brief_path(project)
+        if not path.is_file():
+            return
+        text = path.read_text(encoding="utf-8")
+        stamp = parse_stamp(text)
+        warn = ""
+        if stamp:
+            newest = max((s.stat().st_mtime
+                          for s in find_sessions(project)), default=0)
+            if newest > stamp["newest_mtime"]:
+                warn = ("\n(warning: sessions newer than this brief "
+                        "exist — refresh with `chf --brief`)\n")
+        sys.stdout.write(
+            '<project-memory source="claude-handoff" '
+            'refresh="chf --brief">\n'
+            + text + warn + "\n</project-memory>\n")
+    except Exception:  # deliberately swallow: see docstring
+        return
+
+
+
+def run_brief_update_mode() -> None:
+    """SessionEnd hook entrypoint: refresh the factual skeleton of an
+    existing brief (never an LLM call, never creates files). Silent on
+    any problem — a hook must never break the host session."""
+    try:
+        payload = json.load(sys.stdin)
+        project = cwd_project_filter(Path(payload["cwd"]))
+        if project:
+            update_brief_skeleton(project)
+    except Exception:  # deliberately swallow: see docstring
+        return

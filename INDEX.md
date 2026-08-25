@@ -10,6 +10,8 @@ claude-handoff/
 │   ├── discovery.py       ← session globbing, labels, --name/--grep, picker
 │   ├── render.py          ← markdown sections + --format json
 │   ├── llm.py             ← provider registry, map-reduce, cache, progress
+│   ├── brief.py           ← --brief: whole-project memory (timeline + LLM
+│   │                        distillation, cached per session)
 │   ├── integrations.py    ← clipboard, MCP server, SessionEnd hook
 │   ├── cli.py             ← argparse, source resolution, main
 │   └── _version.py / __init__.py / __main__.py

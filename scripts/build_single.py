@@ -20,7 +20,7 @@ ARTIFACT = ROOT / "single" / "claude_handoff.py"
 # Concatenation order — dependencies first (call-time resolution makes the
 # order forgiving, but keep it meaningful for human readers).
 ORDER = ["textutil", "redact", "parse", "webexport", "discovery",
-         "render", "llm", "integrations", "cli"]
+         "render", "llm", "brief", "integrations", "cli"]
 
 STDLIB_BLOCK = """\
 from __future__ import annotations
@@ -49,9 +49,17 @@ def module_body(name: str) -> str:
     out = []
     in_header = True
     open_paren = False
+    in_doc = False
     for i, line in enumerate(lines):
         if i == 0 and line.startswith('"""'):
-            continue                      # one-line module docstring
+            body = line.rstrip()
+            if body == '"""' or not body.endswith('"""'):
+                in_doc = True             # multi-line module docstring
+            continue
+        if in_doc:
+            if '"""' in line:
+                in_doc = False
+            continue
         if in_header:
             s = line.strip()
             if open_paren:

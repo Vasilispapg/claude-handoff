@@ -47,6 +47,12 @@ import sys  # noqa: F401
 import time  # noqa: F401
 
 from ._version import __version__  # noqa: F401
+from .brief import (  # noqa: F401
+    BRIEFS_DIR,
+    brief_path,
+    build_brief_deterministic,
+    build_brief_llm,
+)
 from .cli import (  # noqa: F401
                        _fit_transcript_cap,
                        _fmt_tokens,
@@ -73,13 +79,18 @@ from .discovery import (  # noqa: F401
                        session_label,
 )
 from .integrations import (  # noqa: F401
+    BRIEF_HOOK_COMMAND,
+    BRIEF_UPDATE_COMMAND,
                        HANDOFFS_DIR,
                        HOOK_COMMAND,
                        MCP_PROTOCOL,
                        _copy_clipboard,
                        _mcp_call,
                        _mcp_tools,
+                       install_brief_hook,
                        install_hook,
+                       run_brief_hook_mode,
+                       run_brief_update_mode,
                        run_hook_mode,
                        run_mcp_server,
 )

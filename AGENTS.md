@@ -56,7 +56,7 @@ pip install -e . && claude-handoff --version  # packaging check
 
 Import direction flows strictly downward (no cycles): `textutil` →
 `redact` → `parse` → `webexport` → `discovery` → `render` → `llm` →
-`integrations` → `cli` (plus `_version`, `__init__` re-exports,
+`brief` → `integrations` → `cli` (plus `_version`, `__init__` re-exports,
 `__main__`). Concern groups below note their module.
 
 - Discovery (`discovery.py`): `find_sessions`, `session_label` (title + first prompt),
@@ -84,6 +84,13 @@ Import direction flows strictly downward (no cycles): `textutil` →
   `clean_text`, `tool_summary`
 - Rendering (`render.py`): `render_header`, `render_activity`, `render_transcript`,
   `render_footer`, `build_deterministic`
+- Project memory (`brief.py`): `build_brief_deterministic` (timeline +
+  activity rollup), `build_brief_llm` (per-session notes, cached by
+  prompt+content hash, then one reduce — `SESSION_NOTE_PROMPT` /
+  `BRIEF_PROMPT`), `brief_path` (~/.claude/briefs). Hook side lives in
+  integrations.py: `install_brief_hook` / `run_brief_hook_mode`
+  (SessionStart, plain stdout becomes context; matcher
+  startup|resume|clear|compact).
 - LLM mode (`llm.py`): `PROVIDERS` registry (env keys + default model + call
   strategy per provider), `provider_key`, `_call_claude`, `_call_openai`,
   `_call_gemini`, `_call_claude_cli`, `http_json`, `llm_summarize`,

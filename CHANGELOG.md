@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.13.0 — 2026-08-26
+
+- **Project memory — `--brief`**: distill EVERY session of a project
+  into one living document at `~/.claude/briefs/<project>.md` — a
+  factual session timeline + most-touched files, and with `--llm` a
+  distilled memory (Decisions / Fixed / Conventions / Open threads),
+  every bullet citing the session it came from. Per-session notes are
+  cached, so refreshing after new sessions costs only the new ones.
+- **`--install-brief-hook`**: two hooks — SessionStart injects the
+  brief as context (Claude starts already knowing the project);
+  SessionEnd auto-refreshes the factual skeleton for free. Hooks
+  never trigger LLM calls or create files; a freshness stamp makes
+  staleness visible in the file and as an injection warning, and the
+  timeline is capped at 20 bullets so injection stays bounded.
+- Internals: `_resolve_provider` extracted (shared key/model
+  resolution), hook settings editing generalized, single-file build
+  now handles multi-line module docstrings.
+
 ## 0.12.0 — 2026-08-26
 
 - **`--anonymize`**: strip identity for public sharing — home paths

@@ -3,8 +3,11 @@
 Thanks for helping! Ground rules, in order of importance:
 
 **Zero dependencies is the product.** PRs adding runtime dependencies will be
-declined — the whole point is one auditable stdlib-only file you can `curl`.
-Dev-only tooling is fine as long as `claude_handoff.py` stays standalone.
+declined — the whole point is an auditable stdlib-only tool you can
+`curl` (the generated `single/claude_handoff.py`). Dev-only tooling is
+fine. Runtime code lives in the `claude_handoff/` package; after any
+package change run `python3 scripts/build_single.py` so the single-file
+build stays fresh (CI fails when it is stale).
 
 **Fixtures first.** The Claude Code JSONL schema is undocumented and drifts
 between versions. If the parser breaks on your session: strip the session
@@ -17,7 +20,8 @@ description.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 claude_handoff.py tests/fixtures/classic_session.jsonl -o - --include-tools
+python3 -m claude_handoff tests/fixtures/classic_session.jsonl -o - --include-tools
+python3 scripts/build_single.py --check
 ```
 
 CI runs the suite on Linux, macOS and Windows (Python 3.9 and 3.13) —

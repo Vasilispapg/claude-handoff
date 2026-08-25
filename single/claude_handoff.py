@@ -35,6 +35,9 @@ Huge sessions are map-reduced in chunks with a resume cache; secrets are
 redacted before anything leaves the machine.
 """
 
+# GENERATED FILE — do not edit. Source of truth: the claude_handoff/
+# package in this repo. Rebuild with: python3 scripts/build_single.py
+
 from __future__ import annotations
 
 import argparse
@@ -53,52 +56,12 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
-PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
-# Message-level caps (deterministic mode). Head+tail are kept when truncating.
-USER_MSG_CAP = 8000
-ASSISTANT_MSG_CAP = 5000
-TOOL_LINE_CAP = 200
-DEFAULT_MAX_CHARS = 80_000       # global cap on the transcript section
-LLM_INPUT_CAP = 400_000          # max transcript chars for a single LLM pass
-CHUNK_CAP = 200_000              # chunk size for map-reduce over huge sessions
-
-# Subprocess/local backends must not run chunks concurrently (nested claude
-# CLIs conflict; a local Ollama box chokes); API providers fan out fine.
-SERIAL_PROVIDERS = {"claude-cli", "ollama"}
-PARALLEL_WORKERS = 4
-
-# Chunk-note cache: failed/interrupted map-reduce runs resume for free, and
-# re-runs (e.g. with a different --focus) reuse paid-for chunk notes.
-CACHE_DIR = Path(os.environ.get(
-    "CLAUDE_HANDOFF_CACHE", str(Path.home() / ".cache" / "claude-handoff")))
-CACHE_VERSION = "1"              # bump when CHUNK_PROMPT changes
-
-# Secret-shaped strings are stripped from transcripts before any --llm call
-# (zero-trust: session logs routinely contain keys pasted into commands).
-SECRET_RES = [
-    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),                    # OpenAI/Anthropic
-    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"),  # GitHub
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),             # Slack
-    re.compile(r"\bAKIA[A-Z0-9]{16}\b"),                       # AWS key id
-    re.compile(r"\bAIza[A-Za-z0-9_-]{30,}"),                   # Google
-    re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9._-]{20,}"),  # JWT
-    re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/-]{20,}=*"),
-    re.compile(r"((?:api[_-]?key|access[_-]?token|secret|password|passwd"
-               r"|authorization)\s*[=:]\s*[\"']?)[^\s\"'\[]{8,}",
-               re.IGNORECASE),
-]
-
-# LLM provider registry for --llm — see the "LLM summarization" section.
-# Adding a provider = one entry here + one _call_* function; nothing else
-# changes (open/closed). Populated after the call functions are defined.
-PROVIDERS: dict = {}
-
-FILE_TOOLS_WRITE = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
-FILE_TOOLS_READ = {"Read"}
+# --------------------------------------------------------------------------- #
+#  textutil
+# --------------------------------------------------------------------------- #
 
 NOISE_RE = re.compile(
     r"<system-reminder>.*?</system-reminder>"
@@ -110,314 +73,6 @@ NOISE_RE = re.compile(
     re.DOTALL,
 )
 CAVEAT_RE = re.compile(r"^Caveat: The messages below were generated.*?$", re.MULTILINE)
-
-
-# --------------------------------------------------------------------------- #
-#  Session discovery
-# --------------------------------------------------------------------------- #
-
-def find_sessions(project_filter: str | None = None,
-                  projects_dir: Path | None = None) -> list[Path]:
-    """All session JSONL files, newest first."""
-    projects_dir = projects_dir or PROJECTS_DIR
-    if not projects_dir.is_dir():
-        return []
-    sessions = []
-    for proj in sorted(projects_dir.iterdir()):
-        if not proj.is_dir():
-            continue
-        if project_filter and project_filter.lower() not in proj.name.lower():
-            continue
-        sessions.extend(p for p in proj.glob("*.jsonl") if p.stat().st_size > 0)
-    return sorted(sessions, key=lambda p: p.stat().st_mtime, reverse=True)
-
-
-def encode_project_path(path: Path) -> str:
-    """A filesystem path the way Claude Code encodes it into a project dir
-    name under ~/.claude/projects (every non-alphanumeric char becomes -)."""
-    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
-
-
-def cwd_project_filter(cwd: Path | None = None,
-                       projects_dir: Path | None = None,
-                       home: Path | None = None) -> str | None:
-    """Project filter implied by the current directory, or None for global.
-
-    - cwd (or an ancestor) is a project root  → that project.
-    - cwd is a parent "master folder" of several project roots → all of
-      them (prefix match). Home and / never scope.
-    """
-    cwd = cwd or Path.cwd()
-    projects_dir = projects_dir or PROJECTS_DIR
-    home = home or Path.home()
-    if not projects_dir.is_dir():
-        return None
-    names = [d.name for d in projects_dir.iterdir() if d.is_dir()]
-
-    # master folder: only the cwd itself, and never home or /
-    encoded = encode_project_path(cwd)
-    if cwd not in (home, Path("/")):
-        if any(n == encoded or n.startswith(encoded + "-") for n in names):
-            return encoded
-    # exact project root among ancestors (covers being in a subfolder)
-    for candidate in cwd.parents:
-        encoded = encode_project_path(candidate)
-        if encoded in names:
-            return encoded
-    return None
-
-
-def session_label(path: Path) -> tuple[str | None, str]:
-    """Best-effort (title, first human prompt) of a session.
-
-    Titles come from Claude Code's own `summary` records. Reads only the
-    head of the file — stops at the first real prompt. Used by --list and
-    by name matching.
-    """
-    title = None
-    try:
-        with path.open(encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                rtype = rec.get("type")
-                if rtype == "summary" and rec.get("summary"):
-                    title = rec["summary"]
-                elif rtype == "last-prompt" and rec.get("lastPrompt"):
-                    return title, one_line(rec["lastPrompt"], 80)
-                elif rtype == "user" and not rec.get("isMeta"):
-                    text = clean_text(user_text(rec.get("message") or {}))
-                    if text:
-                        return title, one_line(text, 80)
-    except OSError:
-        pass
-    return title, "(empty)"
-
-
-def find_session_by_name(query: str,
-                         project_filter: str | None = None) -> list[Path]:
-    """Sessions whose title, first prompt, or file name contains `query`
-    (case-insensitive), newest first."""
-    query = query.lower()
-    matches = []
-    for path in find_sessions(project_filter):
-        title, prompt = session_label(path)
-        haystack = " ".join(filter(None, (title, prompt, path.stem))).lower()
-        if query in haystack:
-            matches.append(path)
-    return matches
-
-
-def grep_sessions(pattern: str,
-                  project_filter: str | None = None) -> list[tuple]:
-    """Sessions whose conversation text (user/assistant turns) contains
-    `pattern` (case-insensitive substring), newest first, each paired with
-    a short match preview. Tool noise doesn't count — only what the human
-    and the assistant actually said."""
-    needle = pattern.lower()
-    hits = []
-    for path in find_sessions(project_filter):
-        try:
-            parsed = parse_session(path)
-        except OSError:
-            continue  # unreadable file must not kill the search
-        for turn in parsed["turns"]:
-            if turn["role"] not in ("user", "assistant"):
-                continue
-            text = "\n".join(turn["text_parts"])
-            idx = text.lower().find(needle)
-            if idx >= 0:
-                start = max(0, idx - 40)
-                preview = text[start:idx + len(needle) + 40]
-                hits.append((path, one_line(preview, 100)))
-                break
-    return hits
-
-
-def list_sessions(project_filter: str | None, grep: str | None = None) -> None:
-    if grep:
-        pairs = grep_sessions(grep, project_filter)
-        previews = dict(pairs)
-        sessions = [p for p, _ in pairs]
-        if not sessions:
-            print(f"No session text matches {grep!r} under {PROJECTS_DIR}",
-                  file=sys.stderr)
-            return
-    else:
-        previews = {}
-        sessions = find_sessions(project_filter)
-    if not sessions:
-        print(f"No sessions found under {PROJECTS_DIR}", file=sys.stderr)
-        return
-    for p in sessions:
-        mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-        size_kb = p.stat().st_size // 1024
-        proj = p.parent.name.lstrip("-").replace("-", "/")
-        title, prompt = session_label(p)
-        label = f"{title} · {prompt}" if title else prompt
-        print(f"{mtime}  {size_kb:>6} KB  {p.stem[:8]}  {proj}")
-        print(f"                              └─ {one_line(label, 110)}")
-        if p in previews:
-            print(f"                              🔍 {previews[p]}")
-
-
-# --------------------------------------------------------------------------- #
-#  Parsing
-# --------------------------------------------------------------------------- #
-
-def is_web_export(path: Path) -> bool:
-    """True for a claude.ai data export (conversations.json): a .json file
-    whose first non-whitespace byte opens a JSON array."""
-    if path.suffix.lower() != ".json":
-        return False
-    try:
-        with path.open(encoding="utf-8", errors="replace") as fh:
-            head = fh.read(64).lstrip()
-        return head.startswith("[")
-    except OSError:
-        return False
-
-
-def _web_message_text(msg: dict) -> str:
-    text = msg.get("text")
-    if not text:
-        content = msg.get("content")
-        if isinstance(content, list):
-            text = "\n".join(b.get("text", "") for b in content
-                             if isinstance(b, dict) and b.get("type") == "text")
-    text = (text or "").strip()
-    if msg.get("attachments") or msg.get("files"):
-        text = (text + "\n\n[attachment]").strip()
-    return text
-
-
-def _load_web_conversations(path: Path) -> list[dict]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError) as e:
-        raise SystemExit(f"Cannot read claude.ai export {path}: {e}") from e
-    return [c for c in data if isinstance(c, dict)] if isinstance(data, list) \
-        else []
-
-
-def _epoch_iso(t) -> str | None:
-    try:
-        return datetime.fromtimestamp(float(t), timezone.utc).isoformat()
-    except (TypeError, ValueError, OSError):
-        return None
-
-
-def _convo_title(convo: dict) -> str:
-    return str(convo.get("name") or convo.get("title") or "")
-
-
-def _convo_updated(convo: dict) -> datetime:
-    """Comparable freshness of a claude.ai (ISO) or ChatGPT (epoch) convo."""
-    ts = (_parse_ts(convo.get("updated_at") or convo.get("created_at"))
-          or _parse_ts(_epoch_iso(convo.get("update_time")
-                                  or convo.get("create_time"))))
-    return ts or datetime.min.replace(tzinfo=timezone.utc)
-
-
-def _chatgpt_messages(convo: dict) -> list[tuple[str, str, str | None]]:
-    """(role, text, iso_ts) triples from a ChatGPT export conversation —
-    walks the canonical thread backward from current_node."""
-    mapping = convo.get("mapping")
-    if not isinstance(mapping, dict):
-        return []
-    chain = []
-    node = mapping.get(convo.get("current_node"))
-    hops = 0
-    while isinstance(node, dict) and hops < 100_000:
-        chain.append(node)
-        node = mapping.get(node.get("parent"))
-        hops += 1
-    out = []
-    for node in reversed(chain):
-        msg = node.get("message")
-        if not isinstance(msg, dict):
-            continue
-        role = (msg.get("author") or {}).get("role")
-        if role not in ("user", "assistant"):
-            continue  # system prompts and tool traffic are noise here
-        content = msg.get("content") or {}
-        parts = content.get("parts") if isinstance(content, dict) else None
-        text = "\n".join(p for p in parts
-                         if isinstance(p, str)).strip() if parts else ""
-        if text:
-            out.append((role, text, _epoch_iso(msg.get("create_time"))))
-    return out
-
-
-def _claude_web_messages(convo: dict) -> list[tuple[str, str, str | None]]:
-    out = []
-    for msg in convo.get("chat_messages") or []:
-        if not isinstance(msg, dict):
-            continue
-        text = _web_message_text(msg)
-        if text:
-            role = "user" if msg.get("sender") == "human" else "assistant"
-            out.append((role, text, msg.get("created_at")))
-    return out
-
-
-def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
-    """Parse a claude.ai or ChatGPT data export (conversations.json) into
-    the same shape as parse_session. Picks the newest conversation, or the
-    newest whose title matches `name_filter` (case-insensitive)."""
-    convos = _load_web_conversations(path)
-    if name_filter:
-        q = name_filter.lower()
-        convos = [c for c in convos if q in _convo_title(c).lower()]
-    if not convos:
-        raise SystemExit(
-            f"No conversation{f' matching {name_filter!r}' if name_filter else ''} "
-            f"in {path}. Run with --list to see the conversations it holds.")
-    convo = max(convos, key=_convo_updated)
-
-    state = _new_parse_state()
-    meta = state["meta"]
-    meta["session_id"] = convo.get("uuid") or convo.get("id")
-    if _convo_title(convo):
-        meta["summaries"].append(_convo_title(convo))
-    messages = (_claude_web_messages(convo) if "chat_messages" in convo
-                else _chatgpt_messages(convo))
-    for role, text, ts in messages:
-        meta["n_user" if role == "user" else "n_assistant"] += 1
-        meta["first_ts"] = meta["first_ts"] or ts
-        meta["last_ts"] = ts or meta["last_ts"]
-        state["turns"].append({"role": role, "text_parts": [text],
-                               "tools": [], "ts": ts})
-    for key in [k for k in state if k.startswith("_")]:
-        state.pop(key)
-    state.pop("sidechains", None)
-    return state
-
-
-def list_export_conversations(path: Path) -> None:
-    for c in sorted(_load_web_conversations(path), key=_convo_updated,
-                    reverse=True):
-        when = _convo_updated(c).astimezone().strftime("%Y-%m-%d %H:%M")
-        n = len(c.get("chat_messages") or c.get("mapping") or [])
-        cid = str(c.get("uuid") or c.get("id") or "?")[:8]
-        print(f"{when}  {n:>4} msgs  {cid}  "
-              f"{one_line(_convo_title(c) or '(untitled)', 70)}")
-
-
-def load_records(path: Path) -> list[dict]:
-    records = []
-    with path.open(encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue  # tolerate partial/corrupt lines
-    return records
 
 
 def one_line(text: str, cap: int = 80) -> str:
@@ -469,6 +124,86 @@ def truncate(text: str, cap: int) -> str:
     return (
         f"{text[:head]}\n\n[... {omitted} chars omitted ...]\n\n{text[-tail:]}"
     )
+
+
+def fmt_ts(ts: str | None) -> str:
+    if not ts:
+        return "?"
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")) \
+            .astimezone().strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return ts
+
+
+# --------------------------------------------------------------------------- #
+#  redact
+# --------------------------------------------------------------------------- #
+
+# Secret-shaped strings are stripped from transcripts before any --llm call
+# (zero-trust: session logs routinely contain keys pasted into commands).
+SECRET_RES = [
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),                    # OpenAI/Anthropic
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"),  # GitHub
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),             # Slack
+    re.compile(r"\bAKIA[A-Z0-9]{16}\b"),                       # AWS key id
+    re.compile(r"\bAIza[A-Za-z0-9_-]{30,}"),                   # Google
+    re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9._-]{20,}"),  # JWT
+    re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/-]{20,}=*"),
+    re.compile(r"((?:api[_-]?key|access[_-]?token|secret|password|passwd"
+               r"|authorization)\s*[=:]\s*[\"']?)[^\s\"'\[]{8,}",
+               re.IGNORECASE),
+]
+
+def redact_secrets(text: str) -> tuple[str, int]:
+    """Replace secret-shaped strings with [REDACTED]; returns (text, count).
+
+    Precision-first: known key prefixes and KEY=value assignments only —
+    git hashes, URLs and normal prose are left alone.
+    """
+    total = 0
+    for pattern in SECRET_RES:
+        def _sub(m: re.Match[str]) -> str:
+            keep = m.group(1) if m.groups() else ""
+            return keep + "[REDACTED]"
+        text, n = pattern.subn(_sub, text)
+        total += n
+    return text, total
+
+
+def redact_doc(doc: str, hint: bool = True) -> str:
+    """Redact the final document — a written or pasted handoff is egress
+    too, not just what goes to an LLM."""
+    doc, n = redact_secrets(doc)
+    if n:
+        note = " (--no-redact to disable)" if hint else ""
+        print(f"Redacted {n} secret-looking string(s) in the "
+              f"output{note}.", file=sys.stderr)
+    return doc
+
+
+# --------------------------------------------------------------------------- #
+#  parse
+# --------------------------------------------------------------------------- #
+
+FILE_TOOLS_WRITE = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+FILE_TOOLS_READ = {"Read"}
+
+def load_records(path: Path) -> Iterator[dict]:
+    """Yield JSONL records one at a time; corrupt lines are skipped.
+
+    A generator, so hundreds-of-MB sessions stream instead of landing in
+    memory, and early-exit consumers stop reading the file."""
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue  # tolerate partial/corrupt lines
 
 
 def tool_summary(name: str, tool_input: dict) -> tuple[str, str | None, str | None]:
@@ -820,16 +555,477 @@ def slice_turns(parsed: dict, last: int | None = None,
 #  Rendering
 # --------------------------------------------------------------------------- #
 
-def fmt_ts(ts: str | None) -> str:
-    if not ts:
-        return "?"
+def merge_parsed(parsed_list: list[dict]) -> dict:
+    """Merge several parsed sessions (oldest first) into one, with a
+    session-break turn opening each — for --merge project-wide handoffs."""
+    merged = _new_parse_state()
+    merged.pop("_tool_names")
+    m = merged["meta"]
+    for n, parsed in enumerate(parsed_list, 1):
+        pm = parsed["meta"]
+        for key in ("cwd", "git_branch", "session_id", "version"):
+            m[key] = m[key] or pm[key]
+        m["models"] |= pm["models"]
+        m["first_ts"] = m["first_ts"] or pm["first_ts"]
+        m["last_ts"] = pm["last_ts"] or m["last_ts"]
+        for key in ("n_user", "n_assistant", "n_tools", "n_agents",
+                    "tok_in", "tok_out"):
+            m[key] += pm.get(key, 0)
+        m["summaries"].extend(pm["summaries"])
+        label = (pm["summaries"][-1] if pm["summaries"]
+                 else f"{pm['n_user']} user messages")
+        merged["turns"].append({
+            "role": "session-break", "tools": [], "ts": pm["first_ts"],
+            "text_parts": [f"Session {n}/{len(parsed_list)} — "
+                           f"{fmt_ts(pm['first_ts'])} → "
+                           f"{fmt_ts(pm['last_ts'])} · {label}"],
+        })
+        merged["turns"].extend(parsed["turns"])
+        for fdict, key in ((parsed["files_written"], "files_written"),
+                           (parsed["files_read"], "files_read")):
+            for f, count in fdict.items():
+                merged[key][f] = merged[key].get(f, 0) + count
+        merged["commands"].extend(parsed["commands"])
+        merged["sidechains"].extend(parsed.get("sidechains", []))
+    return merged
+
+
+def looks_trivial(parsed: dict) -> bool:
+    """True for sessions with (almost) no conversation — e.g. the stub
+    session `claude /login` leaves behind, or a chat someone typed a single
+    shell command into. Auto-selection skips these; explicit choices don't.
+    """
+    meta = parsed["meta"]
+    if meta["n_user"] + meta["n_assistant"] > 2:
+        return False
+    chars = sum(len(part) for turn in parsed["turns"]
+                for part in turn["text_parts"])
+    return chars < 600
+
+
+# --------------------------------------------------------------------------- #
+#  webexport
+# --------------------------------------------------------------------------- #
+
+def is_web_export(path: Path) -> bool:
+    """True for a claude.ai data export (conversations.json): a .json file
+    whose first non-whitespace byte opens a JSON array."""
+    if path.suffix.lower() != ".json":
+        return False
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")) \
-            .astimezone().strftime("%Y-%m-%d %H:%M")
-    except ValueError:
-        return ts
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            head = fh.read(64).lstrip()
+        return head.startswith("[")
+    except OSError:
+        return False
 
 
+def _web_message_text(msg: dict) -> str:
+    text = msg.get("text")
+    if not text:
+        content = msg.get("content")
+        if isinstance(content, list):
+            text = "\n".join(b.get("text", "") for b in content
+                             if isinstance(b, dict) and b.get("type") == "text")
+    text = (text or "").strip()
+    if msg.get("attachments") or msg.get("files"):
+        text = (text + "\n\n[attachment]").strip()
+    return text
+
+
+def _load_web_conversations(path: Path) -> list[dict]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"Cannot read claude.ai export {path}: {e}") from e
+    return [c for c in data if isinstance(c, dict)] if isinstance(data, list) \
+        else []
+
+
+def _epoch_iso(t) -> str | None:
+    try:
+        return datetime.fromtimestamp(float(t), timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _convo_title(convo: dict) -> str:
+    return str(convo.get("name") or convo.get("title") or "")
+
+
+def _convo_updated(convo: dict) -> datetime:
+    """Comparable freshness of a claude.ai (ISO) or ChatGPT (epoch) convo."""
+    ts = (_parse_ts(convo.get("updated_at") or convo.get("created_at"))
+          or _parse_ts(_epoch_iso(convo.get("update_time")
+                                  or convo.get("create_time"))))
+    return ts or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _chatgpt_messages(convo: dict) -> list[tuple[str, str, str | None]]:
+    """(role, text, iso_ts) triples from a ChatGPT export conversation —
+    walks the canonical thread backward from current_node."""
+    mapping = convo.get("mapping")
+    if not isinstance(mapping, dict):
+        return []
+    chain = []
+    node = mapping.get(convo.get("current_node"))
+    hops = 0
+    while isinstance(node, dict) and hops < 100_000:
+        chain.append(node)
+        node = mapping.get(node.get("parent"))
+        hops += 1
+    out = []
+    for node in reversed(chain):
+        msg = node.get("message")
+        if not isinstance(msg, dict):
+            continue
+        role = (msg.get("author") or {}).get("role")
+        if role not in ("user", "assistant"):
+            continue  # system prompts and tool traffic are noise here
+        content = msg.get("content") or {}
+        parts = content.get("parts") if isinstance(content, dict) else None
+        text = "\n".join(p for p in parts
+                         if isinstance(p, str)).strip() if parts else ""
+        if text:
+            out.append((role, text, _epoch_iso(msg.get("create_time"))))
+    return out
+
+
+def _claude_web_messages(convo: dict) -> list[tuple[str, str, str | None]]:
+    out = []
+    for msg in convo.get("chat_messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        text = _web_message_text(msg)
+        if text:
+            role = "user" if msg.get("sender") == "human" else "assistant"
+            out.append((role, text, msg.get("created_at")))
+    return out
+
+
+def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
+    """Parse a claude.ai or ChatGPT data export (conversations.json) into
+    the same shape as parse_session. Picks the newest conversation, or the
+    newest whose title matches `name_filter` (case-insensitive)."""
+    convos = _load_web_conversations(path)
+    if name_filter:
+        q = name_filter.lower()
+        convos = [c for c in convos if q in _convo_title(c).lower()]
+    if not convos:
+        raise SystemExit(
+            f"No conversation{f' matching {name_filter!r}' if name_filter else ''} "
+            f"in {path}. Run with --list to see the conversations it holds.")
+    convo = max(convos, key=_convo_updated)
+
+    state = _new_parse_state()
+    meta = state["meta"]
+    meta["session_id"] = convo.get("uuid") or convo.get("id")
+    if _convo_title(convo):
+        meta["summaries"].append(_convo_title(convo))
+    messages = (_claude_web_messages(convo) if "chat_messages" in convo
+                else _chatgpt_messages(convo))
+    for role, text, ts in messages:
+        meta["n_user" if role == "user" else "n_assistant"] += 1
+        meta["first_ts"] = meta["first_ts"] or ts
+        meta["last_ts"] = ts or meta["last_ts"]
+        state["turns"].append({"role": role, "text_parts": [text],
+                               "tools": [], "ts": ts})
+    for key in [k for k in state if k.startswith("_")]:
+        state.pop(key)
+    state.pop("sidechains", None)
+    return state
+
+
+def list_export_conversations(path: Path) -> None:
+    for c in sorted(_load_web_conversations(path), key=_convo_updated,
+                    reverse=True):
+        when = _convo_updated(c).astimezone().strftime("%Y-%m-%d %H:%M")
+        n = len(c.get("chat_messages") or c.get("mapping") or [])
+        cid = str(c.get("uuid") or c.get("id") or "?")[:8]
+        print(f"{when}  {n:>4} msgs  {cid}  "
+              f"{one_line(_convo_title(c) or '(untitled)', 70)}")
+
+
+# --------------------------------------------------------------------------- #
+#  discovery
+# --------------------------------------------------------------------------- #
+
+PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
+
+# --------------------------------------------------------------------------- #
+#  Session discovery
+# --------------------------------------------------------------------------- #
+
+def find_sessions(project_filter: str | None = None,
+                  projects_dir: Path | None = None) -> list[Path]:
+    """All session JSONL files, newest first."""
+    projects_dir = projects_dir or PROJECTS_DIR
+    if not projects_dir.is_dir():
+        return []
+    sessions = []
+    for proj in sorted(projects_dir.iterdir()):
+        if not proj.is_dir():
+            continue
+        if project_filter and project_filter.lower() not in proj.name.lower():
+            continue
+        sessions.extend(p for p in proj.glob("*.jsonl") if p.stat().st_size > 0)
+    return sorted(sessions, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def encode_project_path(path: Path) -> str:
+    """A filesystem path the way Claude Code encodes it into a project dir
+    name under ~/.claude/projects (every non-alphanumeric char becomes -)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def cwd_project_filter(cwd: Path | None = None,
+                       projects_dir: Path | None = None,
+                       home: Path | None = None) -> str | None:
+    """Project filter implied by the current directory, or None for global.
+
+    - cwd (or an ancestor) is a project root  → that project.
+    - cwd is a parent "master folder" of several project roots → all of
+      them (prefix match). Home and / never scope.
+    """
+    cwd = cwd or Path.cwd()
+    projects_dir = projects_dir or PROJECTS_DIR
+    home = home or Path.home()
+    if not projects_dir.is_dir():
+        return None
+    names = [d.name for d in projects_dir.iterdir() if d.is_dir()]
+
+    # master folder: only the cwd itself, and never home or /
+    encoded = encode_project_path(cwd)
+    if cwd not in (home, Path("/")):
+        if any(n == encoded or n.startswith(encoded + "-") for n in names):
+            return encoded
+    # exact project root among ancestors (covers being in a subfolder)
+    for candidate in cwd.parents:
+        encoded = encode_project_path(candidate)
+        if encoded in names:
+            return encoded
+    return None
+
+
+def session_label(path: Path) -> tuple[str | None, str]:
+    """Best-effort (title, first human prompt) of a session.
+
+    Titles come from Claude Code's own `summary` records. Reads only the
+    head of the file — stops at the first real prompt. Used by --list and
+    by name matching.
+    """
+    title = None
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rtype = rec.get("type")
+                if rtype == "summary" and rec.get("summary"):
+                    title = rec["summary"]
+                elif rtype == "last-prompt" and rec.get("lastPrompt"):
+                    return title, one_line(rec["lastPrompt"], 80)
+                elif rtype == "user" and not rec.get("isMeta"):
+                    text = clean_text(user_text(rec.get("message") or {}))
+                    if text:
+                        return title, one_line(text, 80)
+    except OSError:
+        pass
+    return title, "(empty)"
+
+
+def find_session_by_name(query: str,
+                         project_filter: str | None = None) -> list[Path]:
+    """Sessions whose title, first prompt, or file name contains `query`
+    (case-insensitive), newest first."""
+    query = query.lower()
+    matches = []
+    for path in find_sessions(project_filter):
+        title, prompt = session_label(path)
+        haystack = " ".join(filter(None, (title, prompt, path.stem))).lower()
+        if query in haystack:
+            matches.append(path)
+    return matches
+
+
+def _raw_prefilter_ok(needle: str) -> bool:
+    """True when a raw-JSONL substring scan is a safe superset test for
+    `needle` — JSON escaping (\\" \\\\ \\n \\uXXXX) would hide real matches
+    for quotes, backslashes, newlines, and non-ASCII text."""
+    return bool(re.fullmatch(r'[ !#-\[\]-~]+', needle))
+
+
+def _may_contain(path: Path, needle: str,
+                 block_size: int = 1 << 20) -> bool:
+    """Cheap streaming raw check before paying for a full parse.
+
+    Binary mode on purpose: `_raw_prefilter_ok` guarantees an ASCII-only
+    needle, so `bytes.lower()` is exact while skipping both the UTF-8
+    decode and Unicode case-folding of megabytes of transcript (measured
+    ~70% of --grep time). ASCII patterns can never false-match inside
+    multibyte sequences (continuation bytes are ≥ 0x80). Known micro-gap:
+    a match reachable only through a folding expansion that yields ASCII
+    (İ → i̇, K → k) is missed — non-ASCII needles never take this path."""
+    want = needle.encode("ascii")
+    overlap = len(want) - 1
+    tail = b""
+    try:
+        with path.open("rb") as fh:
+            while True:
+                block = fh.read(block_size)
+                if not block:
+                    return False
+                low = block.lower()
+                if want in low or (tail and want in tail + low[:overlap]):
+                    return True
+                tail = low[-overlap:] if overlap else b""
+    except OSError:
+        return False
+
+
+def grep_sessions(pattern: str,
+                  project_filter: str | None = None) -> list[tuple]:
+    """Sessions whose conversation text (user/assistant turns) contains
+    `pattern` (case-insensitive substring), newest first, each paired with
+    a short match preview. Tool noise doesn't count — only what the human
+    and the assistant actually said."""
+    needle = pattern.lower()
+    prefilter = _raw_prefilter_ok(needle)
+    hits = []
+    for path in find_sessions(project_filter):
+        if prefilter and not _may_contain(path, needle):
+            continue  # raw scan is a superset test — safe to skip the parse
+        try:
+            parsed = parse_session(path)
+        except OSError:
+            continue  # unreadable file must not kill the search
+        for turn in parsed["turns"]:
+            if turn["role"] not in ("user", "assistant"):
+                continue
+            text = "\n".join(turn["text_parts"])
+            idx = text.lower().find(needle)
+            if idx >= 0:
+                start = max(0, idx - 40)
+                preview = text[start:idx + len(needle) + 40]
+                hits.append((path, one_line(preview, 100)))
+                break
+    return hits
+
+
+def list_sessions(project_filter: str | None, grep: str | None = None) -> None:
+    if grep:
+        pairs = grep_sessions(grep, project_filter)
+        previews = dict(pairs)
+        sessions = [p for p, _ in pairs]
+        if not sessions:
+            print(f"No session text matches {grep!r} under {PROJECTS_DIR}",
+                  file=sys.stderr)
+            return
+    else:
+        previews = {}
+        sessions = find_sessions(project_filter)
+    if not sessions:
+        print(f"No sessions found under {PROJECTS_DIR}", file=sys.stderr)
+        return
+    for p in sessions:
+        mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        size_kb = p.stat().st_size // 1024
+        proj = p.parent.name.lstrip("-").replace("-", "/")
+        title, prompt = session_label(p)
+        label = f"{title} · {prompt}" if title else prompt
+        print(f"{mtime}  {size_kb:>6} KB  {p.stem[:8]}  {proj}")
+        print(f"                              └─ {one_line(label, 110)}")
+        if p in previews:
+            print(f"                              🔍 {previews[p]}")
+
+
+# --------------------------------------------------------------------------- #
+#  Parsing
+# --------------------------------------------------------------------------- #
+
+def interactive_pick(project_filter: str | None,
+                     grep: str | None = None) -> Path:
+    """Numbered session picker (-i). Terminal only."""
+    if not sys.stdin.isatty():
+        raise SystemExit("-i needs a terminal (stdin is piped) — use "
+                         "--name/--project for scripted selection.")
+    if grep:
+        pairs = grep_sessions(grep, project_filter)[:15]
+        sessions = [p for p, _ in pairs]
+        previews = dict(pairs)
+        if not sessions:
+            raise SystemExit(f"No session text matches {grep!r} — "
+                             f"try --any, or run --list.")
+    else:
+        sessions = find_sessions(project_filter)[:15]
+        previews = {}
+    if not sessions:
+        raise SystemExit(f"No sessions found under {PROJECTS_DIR}.")
+    for n, p in enumerate(sessions, 1):
+        title, prompt = session_label(p)
+        label = f"{title} · {prompt}" if title else prompt
+        proj = p.parent.name.lstrip("-").replace("-", "/")
+        mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d %H:%M")
+        print(f" {n:>2}. {mtime}  {one_line(proj, 44)}\n"
+              f"      {one_line(label, 90)}", file=sys.stderr)
+        if p in previews:
+            print(f"      🔍 {previews[p]}", file=sys.stderr)
+    while True:
+        try:
+            choice = input(f"Pick a session [1-{len(sessions)}, q quits]: ")
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("") from None
+        choice = choice.strip().lower()
+        if choice in ("q", "quit", ""):
+            raise SystemExit("")
+        try:
+            idx = int(choice)
+            if 1 <= idx <= len(sessions):
+                return sessions[idx - 1]
+        except ValueError:
+            pass
+        print("Try a number from the list (or q).", file=sys.stderr)
+
+
+def _newest_named_session(query: str, project_filter: str | None) -> Path:
+    matches = find_session_by_name(query, project_filter)
+    if not matches:
+        raise SystemExit(
+            f"No session matches {query!r}"
+            + (f" in projects matching '{project_filter}'" if project_filter
+               else "")
+            + ". Run `claude-handoff --list` to see titles and prompts.")
+    if len(matches) > 1:
+        print(f"{len(matches)} sessions match {query!r}; using the newest. "
+              f"Run --list to see all of them.", file=sys.stderr)
+    print(f"Using session: {matches[0]}", file=sys.stderr)
+    return matches[0]
+
+
+def _newest_meaningful_session(sessions: list[Path],
+                               max_probe: int = 15) -> Path:
+    """First session (newest-first) that isn't nearly empty."""
+    for path in sessions[:max_probe]:
+        if not looks_trivial(parse_session(path)):
+            return path
+        title, prompt = session_label(path)
+        print(f"Skipping nearly-empty session {path.stem[:8]} "
+              f"({title or prompt}) — pass a path or --name to force it.",
+              file=sys.stderr)
+    return sessions[0]
+
+
+# --------------------------------------------------------------------------- #
+#  render
+# --------------------------------------------------------------------------- #
+
+# Message-level caps (deterministic mode). Head+tail are kept when truncating.
+USER_MSG_CAP = 8000
+ASSISTANT_MSG_CAP = 5000
+TOOL_LINE_CAP = 200
+DEFAULT_MAX_CHARS = 80_000       # global cap on the transcript section
 def render_header(parsed: dict, source: Path) -> str:
     m = parsed["meta"]
     models = ", ".join(sorted(m["models"])) or "?"
@@ -996,6 +1192,30 @@ def build_deterministic(parsed: dict, source: Path, include_tools: bool,
 # --------------------------------------------------------------------------- #
 #  LLM summarization (--llm)
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+#  llm
+# --------------------------------------------------------------------------- #
+
+LLM_INPUT_CAP = 400_000          # max transcript chars for a single LLM pass
+CHUNK_CAP = 200_000              # chunk size for map-reduce over huge sessions
+
+# Subprocess/local backends must not run chunks concurrently (nested claude
+# CLIs conflict; a local Ollama box chokes); API providers fan out fine.
+SERIAL_PROVIDERS = {"claude-cli", "ollama"}
+PARALLEL_WORKERS = 4
+
+# Chunk-note cache: failed/interrupted map-reduce runs resume for free, and
+# re-runs (e.g. with a different --focus) reuse paid-for chunk notes.
+CACHE_DIR = Path(os.environ.get(
+    "CLAUDE_HANDOFF_CACHE", str(Path.home() / ".cache" / "claude-handoff")))
+CACHE_VERSION = "1"              # bump when CHUNK_PROMPT changes
+
+# LLM provider registry for --llm — see the "LLM summarization" section.
+# Adding a provider = one entry here + one _call_* function; nothing else
+# changes (open/closed). Populated after the call functions are defined.
+PROVIDERS: dict = {}
 
 SUMMARY_PROMPT = """\
 Below is the cleaned transcript of a working session between a human and an AI \
@@ -1170,22 +1390,6 @@ PROVIDERS.update({
         "call": _call_ollama,
     },
 })
-
-
-def redact_secrets(text: str) -> tuple[str, int]:
-    """Replace secret-shaped strings with [REDACTED]; returns (text, count).
-
-    Precision-first: known key prefixes and KEY=value assignments only —
-    git hashes, URLs and normal prose are left alone.
-    """
-    total = 0
-    for pattern in SECRET_RES:
-        def _sub(m: "re.Match[str]") -> str:
-            keep = m.group(1) if m.groups() else ""
-            return keep + "[REDACTED]"
-        text, n = pattern.subn(_sub, text)
-        total += n
-    return text, total
 
 
 def _chunk_cache_path(chunk: str, provider: str, model: str | None) -> Path:
@@ -1440,63 +1644,10 @@ def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
 #  CLI
 # --------------------------------------------------------------------------- #
 
-def interactive_pick(project_filter: str | None,
-                     grep: str | None = None) -> Path:
-    """Numbered session picker (-i). Terminal only."""
-    if not sys.stdin.isatty():
-        raise SystemExit("-i needs a terminal (stdin is piped) — use "
-                         "--name/--project for scripted selection.")
-    if grep:
-        pairs = grep_sessions(grep, project_filter)[:15]
-        sessions = [p for p, _ in pairs]
-        previews = dict(pairs)
-        if not sessions:
-            raise SystemExit(f"No session text matches {grep!r} — "
-                             f"try --any, or run --list.")
-    else:
-        sessions = find_sessions(project_filter)[:15]
-        previews = {}
-    if not sessions:
-        raise SystemExit(f"No sessions found under {PROJECTS_DIR}.")
-    for n, p in enumerate(sessions, 1):
-        title, prompt = session_label(p)
-        label = f"{title} · {prompt}" if title else prompt
-        proj = p.parent.name.lstrip("-").replace("-", "/")
-        mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d %H:%M")
-        print(f" {n:>2}. {mtime}  {one_line(proj, 44)}\n"
-              f"      {one_line(label, 90)}", file=sys.stderr)
-        if p in previews:
-            print(f"      🔍 {previews[p]}", file=sys.stderr)
-    while True:
-        try:
-            choice = input(f"Pick a session [1-{len(sessions)}, q quits]: ")
-        except (EOFError, KeyboardInterrupt):
-            raise SystemExit("") from None
-        choice = choice.strip().lower()
-        if choice in ("q", "quit", ""):
-            raise SystemExit("")
-        try:
-            idx = int(choice)
-            if 1 <= idx <= len(sessions):
-                return sessions[idx - 1]
-        except ValueError:
-            pass
-        print("Try a number from the list (or q).", file=sys.stderr)
 
-
-def print_completions(shell: str) -> None:
-    """Emit a shell-completion snippet (works in bash and zsh)."""
-    flags = sorted({opt for action in build_arg_parser()._actions
-                    for opt in action.option_strings})
-    words = " ".join(flags)
-    print(f"# claude-handoff completions ({shell})")
-    if shell == "zsh":
-        print("# add to ~/.zshrc:  eval \"$(claude-handoff --completions zsh)\"")
-        print("autoload -U +X bashcompinit && bashcompinit")
-    else:
-        print("# add to ~/.bashrc: eval \"$(claude-handoff --completions bash)\"")
-    print(f'complete -W "{words}" claude-handoff chf')
-
+# --------------------------------------------------------------------------- #
+#  integrations
+# --------------------------------------------------------------------------- #
 
 def _copy_clipboard(text: str) -> str:
     """Copy text to the system clipboard; returns the tool used."""
@@ -1626,7 +1777,7 @@ def run_mcp_server() -> None:
                                      params.get("arguments"))
                     reply(mid, {"content": [{"type": "text", "text": text}],
                                 "isError": False})
-                except Exception as e:  # noqa: BLE001 — tool errors → result
+                except Exception as e:  # tool errors → isError result
                     reply(mid, {"content": [{"type": "text",
                                              "text": f"error: {e}"}],
                                 "isError": True})
@@ -1637,7 +1788,7 @@ def run_mcp_server() -> None:
             else:
                 reply(mid, error={"code": -32601,
                                   "message": f"method not found: {method}"})
-        except Exception as e:  # noqa: BLE001 — protocol must never die
+        except Exception as e:  # protocol must never die
             reply(mid, error={"code": -32603, "message": str(e)})
 
 
@@ -1717,15 +1868,33 @@ def run_hook_mode() -> None:
             parsed, transcript, include_tools=False,
             max_chars=DEFAULT_MAX_CHARS), hint=False), encoding="utf-8")
         print(f"handoff written: {out}")
-    except Exception:  # noqa: BLE001 — deliberately swallow: see docstring
+    except Exception:  # deliberately swallow: see docstring
         return
+
+
+# --------------------------------------------------------------------------- #
+#  cli
+# --------------------------------------------------------------------------- #
+
+def print_completions(shell: str) -> None:
+    """Emit a shell-completion snippet (works in bash and zsh)."""
+    flags = sorted({opt for action in build_arg_parser()._actions
+                    for opt in action.option_strings})
+    words = " ".join(flags)
+    print(f"# claude-handoff completions ({shell})")
+    if shell == "zsh":
+        print("# add to ~/.zshrc:  eval \"$(claude-handoff --completions zsh)\"")
+        print("autoload -U +X bashcompinit && bashcompinit")
+    else:
+        print("# add to ~/.bashrc: eval \"$(claude-handoff --completions bash)\"")
+    print(f'complete -W "{words}" claude-handoff chf')
 
 
 class _HelpfulParser(argparse.ArgumentParser):
     """argparse's designed extension point: on any usage error, point the
     user at --help and --list instead of leaving them with a bare error."""
 
-    def error(self, message: str) -> None:  # noqa: D102 (argparse contract)
+    def error(self, message: str) -> None:
         self.print_usage(sys.stderr)
         self.exit(2, f"{self.prog}: error: {message}\n"
                      f"Run `{self.prog} --help` to see every option, or "
@@ -1816,82 +1985,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _newest_named_session(query: str, project_filter: str | None) -> Path:
-    matches = find_session_by_name(query, project_filter)
-    if not matches:
-        raise SystemExit(
-            f"No session matches {query!r}"
-            + (f" in projects matching '{project_filter}'" if project_filter
-               else "")
-            + ". Run `claude-handoff --list` to see titles and prompts.")
-    if len(matches) > 1:
-        print(f"{len(matches)} sessions match {query!r}; using the newest. "
-              f"Run --list to see all of them.", file=sys.stderr)
-    print(f"Using session: {matches[0]}", file=sys.stderr)
-    return matches[0]
-
-
-def merge_parsed(parsed_list: list[dict]) -> dict:
-    """Merge several parsed sessions (oldest first) into one, with a
-    session-break turn opening each — for --merge project-wide handoffs."""
-    merged = _new_parse_state()
-    merged.pop("_tool_names")
-    m = merged["meta"]
-    for n, parsed in enumerate(parsed_list, 1):
-        pm = parsed["meta"]
-        for key in ("cwd", "git_branch", "session_id", "version"):
-            m[key] = m[key] or pm[key]
-        m["models"] |= pm["models"]
-        m["first_ts"] = m["first_ts"] or pm["first_ts"]
-        m["last_ts"] = pm["last_ts"] or m["last_ts"]
-        for key in ("n_user", "n_assistant", "n_tools", "n_agents",
-                    "tok_in", "tok_out"):
-            m[key] += pm.get(key, 0)
-        m["summaries"].extend(pm["summaries"])
-        label = (pm["summaries"][-1] if pm["summaries"]
-                 else f"{pm['n_user']} user messages")
-        merged["turns"].append({
-            "role": "session-break", "tools": [], "ts": pm["first_ts"],
-            "text_parts": [f"Session {n}/{len(parsed_list)} — "
-                           f"{fmt_ts(pm['first_ts'])} → "
-                           f"{fmt_ts(pm['last_ts'])} · {label}"],
-        })
-        merged["turns"].extend(parsed["turns"])
-        for fdict, key in ((parsed["files_written"], "files_written"),
-                           (parsed["files_read"], "files_read")):
-            for f, count in fdict.items():
-                merged[key][f] = merged[key].get(f, 0) + count
-        merged["commands"].extend(parsed["commands"])
-        merged["sidechains"].extend(parsed.get("sidechains", []))
-    return merged
-
-
-def looks_trivial(parsed: dict) -> bool:
-    """True for sessions with (almost) no conversation — e.g. the stub
-    session `claude /login` leaves behind, or a chat someone typed a single
-    shell command into. Auto-selection skips these; explicit choices don't.
-    """
-    meta = parsed["meta"]
-    if meta["n_user"] + meta["n_assistant"] > 2:
-        return False
-    chars = sum(len(part) for turn in parsed["turns"]
-                for part in turn["text_parts"])
-    return chars < 600
-
-
-def _newest_meaningful_session(sessions: list[Path],
-                               max_probe: int = 15) -> Path:
-    """First session (newest-first) that isn't nearly empty."""
-    for path in sessions[:max_probe]:
-        if not looks_trivial(parse_session(path)):
-            return path
-        title, prompt = session_label(path)
-        print(f"Skipping nearly-empty session {path.stem[:8]} "
-              f"({title or prompt}) — pass a path or --name to force it.",
-              file=sys.stderr)
-    return sessions[0]
-
-
 def resolve_source(args: argparse.Namespace) -> Path:
     """The session file to export: explicit path, picker, name match, or
     newest in scope."""
@@ -1971,17 +2064,6 @@ def _fit_transcript_cap(parsed: dict, source: Path,
         render_sidechains(parsed) if args.include_sidechains else "",
         render_footer()))
     return max(2000, tokens * 4 - overhead)
-
-
-def redact_doc(doc: str, hint: bool = True) -> str:
-    """Redact the final document — a written or pasted handoff is egress
-    too, not just what goes to an LLM."""
-    doc, n = redact_secrets(doc)
-    if n:
-        note = " (--no-redact to disable)" if hint else ""
-        print(f"Redacted {n} secret-looking string(s) in the "
-              f"output{note}.", file=sys.stderr)
-    return doc
 
 
 def build_document(parsed: dict, source: Path,

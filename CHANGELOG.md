@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.0 — 2026-08-25
+
+- **Package split**: the single 2100-line module became the
+  `claude_handoff/` package — nine single-responsibility modules with
+  acyclic imports (`textutil`, `redact`, `parse`, `webexport`,
+  `discovery`, `render`, `llm`, `integrations`, `cli`). Proven
+  mechanical: outputs byte-identical before/after on all fixtures and
+  a real multi-agent session.
+- **curl still works**: `scripts/build_single.py` stitches the package
+  into the generated `single/claude_handoff.py`; CI fails if it goes
+  stale or drifts behaviorally (`--check`).
+- **Performance**: `load_records` streams (peak RSS on a 20 MB
+  session: 80 MB → 26 MB); `--grep` prefilters with a raw-text
+  superset scan in binary mode when JSON escaping cannot hide a
+  match (worst-case store-wide search 3.3 s → 0.5 s).
+- **Lint**: ruff config in `pyproject.toml` (E/F/I/PLW/RUF), codebase
+  clean; new CI lint job.
+
 ## 0.10.0 — 2026-08-25
 
 - **Output redaction by default**: secret-looking strings are now stripped

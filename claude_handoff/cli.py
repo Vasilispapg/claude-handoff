@@ -1,0 +1,350 @@
+"""CLI: argument parsing, source resolution, document assembly."""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+from ._version import __version__
+from .discovery import (
+    PROJECTS_DIR,
+    _newest_meaningful_session,
+    _newest_named_session,
+    cwd_project_filter,
+    find_session_by_name,
+    find_sessions,
+    grep_sessions,
+    interactive_pick,
+    list_sessions,
+)
+from .integrations import _copy_clipboard, install_hook, run_hook_mode, run_mcp_server
+from .llm import CACHE_DIR, PROVIDERS, build_llm, llm_summarize
+from .parse import looks_trivial, merge_parsed, parse_session, slice_turns
+from .redact import redact_doc, redact_secrets
+from .render import (
+    DEFAULT_MAX_CHARS,
+    build_deterministic,
+    build_json,
+    render_activity,
+    render_footer,
+    render_header,
+    render_sidechains,
+    render_transcript,
+)
+from .webexport import is_web_export, list_export_conversations, parse_web_export
+
+
+def print_completions(shell: str) -> None:
+    """Emit a shell-completion snippet (works in bash and zsh)."""
+    flags = sorted({opt for action in build_arg_parser()._actions
+                    for opt in action.option_strings})
+    words = " ".join(flags)
+    print(f"# claude-handoff completions ({shell})")
+    if shell == "zsh":
+        print("# add to ~/.zshrc:  eval \"$(claude-handoff --completions zsh)\"")
+        print("autoload -U +X bashcompinit && bashcompinit")
+    else:
+        print("# add to ~/.bashrc: eval \"$(claude-handoff --completions bash)\"")
+    print(f'complete -W "{words}" claude-handoff chf')
+
+
+class _HelpfulParser(argparse.ArgumentParser):
+    """argparse's designed extension point: on any usage error, point the
+    user at --help and --list instead of leaving them with a bare error."""
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: error: {message}\n"
+                     f"Run `{self.prog} --help` to see every option, or "
+                     f"`{self.prog} --list` to see your sessions.\n")
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    ap = _HelpfulParser(
+        prog="claude-handoff",
+        description="Summarize & export a Claude Code session for another LLM.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='examples:\n'
+               '  claude-handoff --list\n'
+               '  claude-handoff --name "login bug"       # newest session whose title/prompt matches\n'
+               '  claude-handoff "login bug" --llm claude-cli   # positional works as a name too\n'
+               '  claude-handoff --project myrepo -o -\n',
+    )
+    ap.add_argument("session", nargs="?",
+                    help="path to a session .jsonl, or a name to search for "
+                         "(default: latest session)")
+    ap.add_argument("--list", action="store_true",
+                    help="list available sessions (title · first prompt) and exit")
+    ap.add_argument("--name", metavar="QUERY",
+                    help="pick newest session whose title or first prompt "
+                         "contains QUERY (case-insensitive)")
+    ap.add_argument("--grep", metavar="TEXT",
+                    help="pick newest session whose conversation contains "
+                         "TEXT (case-insensitive; combines with --list/-i "
+                         "to show all matches)")
+    ap.add_argument("--project", metavar="NAME",
+                    help="pick latest session whose project path contains NAME")
+    ap.add_argument("--merge", action="store_true",
+                    help="merge every session in scope (project / cwd / "
+                         "--name match) into ONE handoff, oldest first")
+    ap.add_argument("--format", choices=["md", "json"], default="md",
+                    help="output format (default md; json is machine-"
+                         "readable)")
+    ap.add_argument("--any", action="store_true",
+                    help="ignore the current directory; consider sessions "
+                         "of every project (default when outside a project)")
+    ap.add_argument("-o", "--output", default="handoff.md",
+                    help="output file, or '-' for stdout (default: handoff.md)")
+    ap.add_argument("--include-tools", action="store_true",
+                    help="include collapsed per-tool-call detail in transcript")
+    ap.add_argument("--include-sidechains", action="store_true",
+                    help="append a section with subagent (sidechain) work")
+    ap.add_argument("--last", type=int, metavar="N",
+                    help="keep only the last N user turns")
+    ap.add_argument("--since", metavar="WHEN",
+                    help="keep only turns after WHEN: 2h, 45m, 1d (before "
+                         "session end) or an ISO timestamp")
+    ap.add_argument("-i", "--interactive", action="store_true",
+                    help="pick the session from a numbered list")
+    ap.add_argument("--install-hook", action="store_true",
+                    help="auto-write a handoff when every Claude Code "
+                         "session ends (SessionEnd hook)")
+    ap.add_argument("--uninstall-hook", action="store_true",
+                    help="remove the auto-handoff hook")
+    ap.add_argument("--completions", choices=["bash", "zsh"],
+                    help="print a shell-completion snippet and exit")
+    ap.add_argument("--mcp", action="store_true",
+                    help="run as an MCP server over stdio (tools: "
+                         "list_sessions, handoff)")
+    ap.add_argument("--hook-stdin", action="store_true",
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--max-chars", type=int, default=None,
+                    help=f"cap transcript section size (default {DEFAULT_MAX_CHARS})")
+    ap.add_argument("--fit", metavar="TOKENS", type=_parse_budget,
+                    help="size the deterministic handoff to a token budget "
+                         "(e.g. 32k, 128k, 1m) by tightening transcript "
+                         "truncation; not combinable with --llm/--max-chars")
+    ap.add_argument("--llm", choices=sorted(PROVIDERS),
+                    help="summarize with an LLM instead of deterministic export; "
+                         "claude-cli uses your local Claude Code login, no API key")
+    ap.add_argument("--model", help="override the LLM model id for --llm")
+    ap.add_argument("--focus", metavar="TEXT",
+                    help="with --llm: extra instructions for the summary "
+                         "(e.g. --focus \"emphasize the API decisions\")")
+    ap.add_argument("--with-transcript", action="store_true",
+                    help="with --llm: also append the cleaned transcript")
+    ap.add_argument("--no-redact", action="store_true",
+                    help="with --llm: do not strip secret-looking strings "
+                         "from the transcript before sending it")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="with --llm: disable the chunk-note cache "
+                         f"({CACHE_DIR})")
+    ap.add_argument("--version", action="version", version=__version__)
+    return ap
+
+
+def resolve_source(args: argparse.Namespace) -> Path:
+    """The session file to export: explicit path, picker, name match, or
+    newest in scope."""
+    if getattr(args, "interactive", False):
+        scope = args.project
+        if not scope and not args.any:
+            scope = cwd_project_filter()
+        return interactive_pick(scope, grep=args.grep)
+    if args.grep:
+        if args.session or args.name:
+            raise SystemExit("--grep searches content on its own — combine "
+                             "it with --project/--any, not a path or --name.")
+        scope = args.project
+        if not scope and not args.any:
+            scope = cwd_project_filter()
+        hits = grep_sessions(args.grep, scope)
+        if not hits:
+            raise SystemExit(f"No session text matches {args.grep!r} — try "
+                             f"--any for all projects, or run --list.")
+        source, preview = hits[0]
+        print(f"Using session {source.stem[:8]} — 🔍 {preview}",
+              file=sys.stderr)
+        return source
+    if args.session:
+        source = Path(args.session).expanduser()
+        if source.is_file():
+            return source
+        looks_like_path = "/" in args.session or args.session.endswith(".jsonl")
+        if looks_like_path:
+            raise SystemExit(f"Not a file: {source}. "
+                             f"Run `claude-handoff --list` to see sessions.")
+        return _newest_named_session(args.session, args.project)
+    if args.name:
+        return _newest_named_session(args.name, args.project)
+    scope = args.project
+    if not scope and not args.any:
+        scope = cwd_project_filter()
+        if scope:
+            print("Scoped to this directory's project(s) — pass --any "
+                  "for all projects.", file=sys.stderr)
+    sessions = find_sessions(scope)
+    if not sessions and scope and not args.project:
+        print("No sessions for this directory; falling back to all "
+              "projects.", file=sys.stderr)
+        sessions = find_sessions(None)
+    if not sessions:
+        raise SystemExit(
+            f"No sessions found under {PROJECTS_DIR}"
+            + (f" matching '{args.project}'" if args.project else "")
+            + ". Pass a .jsonl path explicitly, or run --list.")
+    source = _newest_meaningful_session(sessions)
+    print(f"Using latest session: {source}", file=sys.stderr)
+    return source
+
+
+def _parse_budget(spec: str) -> int:
+    """'32k' / '1m' / '128000' → token count (argparse type for --fit)."""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([km]?)", spec.strip().lower())
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"cannot parse token budget {spec!r} — use e.g. 32k, 128k, 1m")
+    mult = {"": 1, "k": 1_000, "m": 1_000_000}[m.group(2)]
+    return int(float(m.group(1)) * mult)
+
+
+def _fmt_tokens(n: int) -> str:
+    return f"{n / 1e6:.1f}M" if n >= 1_000_000 else f"{n / 1000:.1f}k"
+
+
+def _fit_transcript_cap(parsed: dict, source: Path,
+                        args: argparse.Namespace, tokens: int) -> int:
+    """Char cap for the transcript so the whole document roughly fits
+    `tokens` (≈4 chars/token). Fixed sections are measured, never trimmed."""
+    overhead = sum(len(s) + 2 for s in (
+        render_header(parsed, source),
+        render_activity(parsed),
+        render_sidechains(parsed) if args.include_sidechains else "",
+        render_footer()))
+    return max(2000, tokens * 4 - overhead)
+
+
+def build_document(parsed: dict, source: Path,
+                   args: argparse.Namespace) -> str:
+    """Markdown or JSON document, deterministic or LLM-summarized."""
+    max_chars = DEFAULT_MAX_CHARS if args.max_chars is None else args.max_chars
+    if args.format == "json":
+        summary = None
+        if args.llm:
+            outbound = (render_activity(parsed) + "\n\n"
+                        + render_transcript(parsed, include_tools=True,
+                                            max_chars=10**9))
+            if not args.no_redact:
+                outbound, n_red = redact_secrets(outbound)
+                if n_red:
+                    print(f"Redacted {n_red} secret-looking string(s).",
+                          file=sys.stderr)
+            summary = llm_summarize(args.llm, args.model, outbound,
+                                    focus=args.focus,
+                                    use_cache=not args.no_cache)
+        doc = build_json(parsed, source, summary)
+    elif args.llm:
+        doc = build_llm(parsed, source, args.llm, args.model,
+                        args.with_transcript, max_chars,
+                        focus=args.focus, redact=not args.no_redact,
+                        use_cache=not args.no_cache)
+    else:
+        if getattr(args, "fit", None):
+            max_chars = _fit_transcript_cap(parsed, source, args, args.fit)
+        doc = build_deterministic(parsed, source, args.include_tools,
+                                  max_chars,
+                                  include_sidechains=args.include_sidechains)
+    return doc if args.no_redact else redact_doc(doc)
+
+
+def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
+    tok = f"≈{_fmt_tokens(len(doc) // 4)} tokens"
+    if getattr(args, "fit", None):
+        tok += f" (target {_fmt_tokens(args.fit)})"
+    if args.output == "-":
+        sys.stdout.write(doc)
+        if getattr(args, "fit", None):
+            print(f"Handoff {tok}.", file=sys.stderr)
+        return
+    if args.output in ("clipboard", "clip"):
+        tool = _copy_clipboard(doc)
+        print(f"Copied to clipboard via {tool} ({len(doc):,} chars, {tok}, "
+              f"{parsed['meta']['n_user']} user messages"
+              f"{', LLM-summarized' if args.llm else ''}) — paste away.",
+              file=sys.stderr)
+        return
+    out = Path(args.output)
+    out.write_text(doc, encoding="utf-8")
+    n_user = parsed["meta"]["n_user"]
+    print(f"Wrote {out} ({len(doc):,} chars, {tok}, {n_user} user messages"
+          f"{', LLM-summarized' if args.llm else ''})", file=sys.stderr)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_arg_parser().parse_args(argv)
+    if args.fit and (args.llm or args.max_chars is not None):
+        raise SystemExit("--fit sizes the deterministic output on its own — "
+                         "drop --llm / --max-chars when using it.")
+    if args.mcp:
+        run_mcp_server()
+        return
+    if args.completions:
+        print_completions(args.completions)
+        return
+    if args.hook_stdin:
+        run_hook_mode()
+        return
+    if args.install_hook or args.uninstall_hook:
+        install_hook(remove=args.uninstall_hook)
+        return
+    if args.list:
+        if args.session and is_web_export(Path(args.session).expanduser()):
+            list_export_conversations(Path(args.session).expanduser())
+        else:
+            list_sessions(args.project, grep=args.grep)
+        return
+    if args.merge:
+        if args.session:
+            raise SystemExit("--merge discovers sessions itself — drop the "
+                             "explicit path, use --project/--name to scope.")
+        scope = args.project
+        if not scope and not args.any:
+            scope = cwd_project_filter()
+        sessions = find_sessions(scope)
+        if args.name:
+            named = set(find_session_by_name(args.name, scope))
+            sessions = [s for s in sessions if s in named]
+        if len(sessions) > 25:
+            print(f"Merging the 25 most recent of {len(sessions)} sessions.",
+                  file=sys.stderr)
+            sessions = sessions[:25]
+        parsed_list = []
+        for s in reversed(sessions):            # oldest first
+            p = parse_session(s)
+            if p["turns"] and not looks_trivial(p):
+                parsed_list.append(p)
+        if not parsed_list:
+            raise SystemExit("No sessions to merge in this scope — try "
+                             "--project NAME or run --list.")
+        print(f"Merging {len(parsed_list)} sessions.", file=sys.stderr)
+        parsed = merge_parsed(parsed_list)
+        source = Path(f"{len(parsed_list)} merged sessions"
+                      + (f" [{scope}]" if scope else ""))
+    else:
+        source = resolve_source(args)
+        if is_web_export(source):
+            parsed = parse_web_export(source, name_filter=args.name)
+        else:
+            parsed = parse_session(source)
+    if not parsed["turns"]:
+        raise SystemExit("Session parsed but contains no conversation turns.")
+    slice_turns(parsed, last=args.last, since=args.since)
+    if not parsed["turns"]:
+        raise SystemExit("Nothing left after --last/--since — widen the "
+                         "range or drop the filter.")
+    write_output(build_document(parsed, source, args), parsed, args)
+
+
+if __name__ == "__main__":
+    main()

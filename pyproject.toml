@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-handoff"
-version = "0.10.0"
+version = "0.11.0"
 description = "Summarize & export a Claude Code session into one clean handoff.md for Gemini, GPT, or another Claude."
 readme = "README.md"
 license = { text = "MIT" }
@@ -26,4 +26,13 @@ claude-handoff = "claude_handoff:main"
 chf = "claude_handoff:main"
 
 [tool.setuptools]
-py-modules = ["claude_handoff"]
+packages = ["claude_handoff"]
+
+[tool.ruff.lint]
+# E/F/I/PLW/RUF are enforced. SIM, ISC and DTZ stay off: they flag the
+# codebase's established idiom (adjacent f-strings for line wrapping,
+# guard-comment nested ifs, local-time mtimes in listings).
+select = ["E4", "E7", "E9", "F", "I", "PLW", "RUF"]
+# PLW2901: `line = line.strip()` is an established idiom here.
+# RUF001: fixtures and tests are deliberately Greek-language.
+ignore = ["PLW2901", "RUF001"]

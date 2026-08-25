@@ -9,6 +9,15 @@ env:
   PYTHONUTF8: "1"
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Ruff
+        run: pipx run ruff check claude_handoff scripts tests
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -24,4 +33,6 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests -v
       - name: Smoke run
-        run: python claude_handoff.py tests/fixtures/classic_session.jsonl -o smoke.md --include-tools
+        run: python -m claude_handoff tests/fixtures/classic_session.jsonl -o smoke.md --include-tools
+      - name: Single-file artifact is fresh and behaves identically
+        run: python scripts/build_single.py --check

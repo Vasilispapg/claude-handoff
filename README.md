@@ -12,7 +12,7 @@
 
 Claude Code stores every session locally as JSONL (`~/.claude/projects/…/*.jsonl`), full of tool calls, tool results, thinking blocks and system reminders. Existing exporters dump all of that into markdown. `claude-handoff` instead produces a **handoff document**: the actual conversation, what files were touched, what commands ran, and (optionally) an LLM-written summary of goal / decisions / current state / next steps — so the next model can just continue the work.
 
-- **Zero dependencies.** One Python file, stdlib only. Python 3.9+.
+- **Zero dependencies.** Stdlib only, Python 3.9+. A nine-module package — also shipped as a generated single-file script you can `curl` and audit.
 - **Deterministic by default.** No API call, no cost, works offline.
 - **`--llm` when you want a real summary.** Claude, OpenAI or Gemini via your own API key — or `--llm claude-cli`, which runs your locally-installed Claude Code CLI on your existing Pro/Max plan: **no API key at all**.
 - **Noise-free.** Drops tool results, thinking blocks, system reminders, subagent chatter, slash-command envelopes. Keeps user intent, assistant answers, files modified, commands run — including the files and commands of subagents (`agent-*.jsonl`), whose full transcripts stay behind `--include-sidechains`.
@@ -23,8 +23,8 @@ Claude Code stores every session locally as JSONL (`~/.claude/projects/…/*.jso
 ```bash
 pipx install claude-handoff        # or: pip install claude-handoff
 brew install Vasilispapg/tap/claude-handoff   # Homebrew
-# or just grab the file — it's a single stdlib-only script:
-curl -O https://raw.githubusercontent.com/Vasilispapg/claude-handoff/main/claude_handoff.py
+# or just grab the generated single-file build — stdlib-only, auditable:
+curl -O https://raw.githubusercontent.com/Vasilispapg/claude-handoff/main/single/claude_handoff.py
 python3 claude_handoff.py --list
 
 # tab completion (bash or zsh):

@@ -92,10 +92,15 @@ fragile parsing of that result text.
 | `--llm claude-cli`, v0.2.0 | Shells out to the locally-installed Claude Code CLI (`claude -p --output-format json --no-session-persistence`), so Pro/Max subscribers get real summaries with **no API key**. `CLAUDE*` env vars are scrubbed from the subprocess (except `CLAUDE_CODE_OAUTH_TOKEN`) so nested runs from inside a Claude Code session authenticate like a fresh CLI. Same pattern graphify uses for its `claude-cli` backend. |
 | SOLID without classes, v0.2.0 | Public-repo maintainability pass: `parse_session` and `main` split into single-responsibility helpers; behavior verified byte-identical against v0.1.0 output on a real 4 MB session and the fixture. |
 | Handoff preamble addressed to the *receiving* assistant | The output must work as a first message with zero extra prompting. |
+| Package split + generated single file, v0.11.0 | The module hit ~2100 lines; readability won. Nine single-responsibility modules with acyclic `from .module import name` imports; `scripts/build_single.py` stitches them into `single/claude_handoff.py` so the curl-an-auditable-file install survives. The package is the only source of truth — CI fails when the artifact is stale, and the split was proven mechanical: outputs byte-identical before/after on all fixtures and a real multi-agent session. |
+| Streaming parse + grep prefilter, v0.11.0 | `load_records` became a generator (peak RSS parsing a 20 MB session: 80 MB → 26 MB) and `--grep` runs a cheap raw-text superset scan before paying for a full parse — only for needles JSON escaping cannot hide (ASCII without quotes, backslashes, newlines); anything else keeps the full-parse path. The scan is binary — ASCII needles compare against `bytes.lower()`ed raw blocks, skipping UTF-8 decode and Unicode folding (profiled at ~70% of --grep time). Worst-case store-wide grep: 3.3 s → 0.5 s. |
 
 ## 4. Pipeline architecture
 
-`claude_handoff.py`, top to bottom:
+The `claude_handoff/` package — `textutil` → `redact` → `parse` →
+`webexport` → `discovery` → `render` → `llm` → `integrations` → `cli`,
+stitched by `scripts/build_single.py` into `single/claude_handoff.py`
+for curl installs — in pipeline order:
 
 1. **Discovery & selection** — `find_sessions()` globs
    `~/.claude/projects/*/*.jsonl`, newest first; `--project` filters by

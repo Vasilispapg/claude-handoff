@@ -93,7 +93,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn("login", prompt)
 
     def test_find_session_by_name(self):
-        with unittest.mock.patch.object(ch, "find_sessions",
+        with unittest.mock.patch.object(ch.discovery, "find_sessions",
                                         lambda *a, **k: [FIXTURE]):
             self.assertEqual(ch.find_session_by_name("login BUG"), [FIXTURE])
             self.assertEqual(ch.find_session_by_name("unicode"), [FIXTURE])
@@ -104,14 +104,14 @@ class DiscoveryTests(unittest.TestCase):
     def test_resolve_source_positional_name(self):
         import contextlib
         import io
-        with unittest.mock.patch.object(ch, "find_sessions",
+        with unittest.mock.patch.object(ch.discovery, "find_sessions",
                                         lambda *a, **k: [FIXTURE]), \
                 contextlib.redirect_stderr(io.StringIO()):
             args = ch.build_arg_parser().parse_args(["login bug"])
             self.assertEqual(ch.resolve_source(args), FIXTURE)
 
     def test_resolve_source_name_flag_no_match_mentions_list(self):
-        with unittest.mock.patch.object(ch, "find_sessions",
+        with unittest.mock.patch.object(ch.discovery, "find_sessions",
                                         lambda *a, **k: [FIXTURE]):
             args = ch.build_arg_parser().parse_args(["--name", "zzz"])
             with self.assertRaises(SystemExit) as cm:
@@ -140,7 +140,7 @@ class DiscoveryTests(unittest.TestCase):
         import contextlib
         import io
         buf = io.StringIO()
-        with unittest.mock.patch.object(ch, "find_sessions",
+        with unittest.mock.patch.object(ch.cli, "find_sessions",
                                         lambda *a, **k: [TRIVIAL, FIXTURE]), \
                 contextlib.redirect_stderr(buf):
             args = ch.build_arg_parser().parse_args([])
@@ -157,7 +157,7 @@ class DiscoveryTests(unittest.TestCase):
     def test_all_trivial_falls_back_to_newest(self):
         import contextlib
         import io
-        with unittest.mock.patch.object(ch, "find_sessions",
+        with unittest.mock.patch.object(ch.cli, "find_sessions",
                                         lambda *a, **k: [TRIVIAL]), \
                 contextlib.redirect_stderr(io.StringIO()):
             args = ch.build_arg_parser().parse_args([])
@@ -368,7 +368,7 @@ class CwdScopeTests(unittest.TestCase):
             seen.append(project_filter)
             return [FIXTURE]
 
-        with unittest.mock.patch.object(ch, "find_sessions", fake_find), \
+        with unittest.mock.patch.object(ch.cli, "find_sessions", fake_find), \
                 contextlib.redirect_stderr(io.StringIO()):
             args = ch.build_arg_parser().parse_args(["--any"])
             ch.resolve_source(args)
@@ -401,8 +401,8 @@ class SummarizeTests(unittest.TestCase):
         big = "\n\n".join(f"### 🧑 User\n\nmessage {i} " + "x" * 300
                           for i in range(10))
         with self._fake_provider(calls), \
-                unittest.mock.patch.object(ch, "LLM_INPUT_CAP", 1000), \
-                unittest.mock.patch.object(ch, "CHUNK_CAP", 800), \
+                unittest.mock.patch.object(ch.llm, "LLM_INPUT_CAP", 1000), \
+                unittest.mock.patch.object(ch.llm, "CHUNK_CAP", 800), \
                 contextlib.redirect_stderr(io.StringIO()):
             out = ch.llm_summarize("claude-cli", None, big,
                                    focus="care about X", use_cache=False)
@@ -485,13 +485,29 @@ class GrepTests(unittest.TestCase):
 
     def _patch(self):
         return unittest.mock.patch.object(
-            ch, "find_sessions", lambda *a, **k: [AGENT_SESSION, FIXTURE])
+            ch.discovery, "find_sessions",
+            lambda *a, **k: [AGENT_SESSION, FIXTURE])
 
     def test_grep_matches_conversation_text(self):
         with self._patch():
             hits = ch.grep_sessions("unicode")
         self.assertEqual([p for p, _ in hits], [FIXTURE])
         self.assertIn("unicode", hits[0][1].lower())    # preview has context
+
+    def test_may_contain_spans_block_boundaries(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "x.jsonl"
+            p.write_text('{"a": "hello GrepMe world"}', encoding="utf-8")
+            self.assertTrue(
+                ch.discovery._may_contain(p, "grepme", block_size=8))
+            self.assertFalse(
+                ch.discovery._may_contain(p, "absent!", block_size=8))
+
+    def test_grep_matches_greek_text(self):
+        with self._patch():                      # non-ASCII: full-parse path
+            hits = ch.grep_sessions("σπάει")
+        self.assertEqual([p for p, _ in hits], [FIXTURE])
 
     def test_grep_is_case_insensitive(self):
         with self._patch():
@@ -550,7 +566,7 @@ class PickerTests(unittest.TestCase):
     def test_interactive_pick_by_number(self):
         import contextlib
         import io
-        with unittest.mock.patch.object(ch, "find_sessions",
+        with unittest.mock.patch.object(ch.discovery, "find_sessions",
                                         lambda *a, **k: [TRIVIAL, FIXTURE]), \
                 unittest.mock.patch.object(ch.sys.stdin, "isatty",
                                            lambda: True), \
@@ -562,7 +578,7 @@ class PickerTests(unittest.TestCase):
             self.assertEqual(ch.interactive_pick(None), FIXTURE)
 
     def test_interactive_needs_terminal(self):
-        with unittest.mock.patch.object(ch, "find_sessions",
+        with unittest.mock.patch.object(ch.discovery, "find_sessions",
                                         lambda *a, **k: [FIXTURE]), \
                 unittest.mock.patch.object(ch.sys.stdin, "isatty",
                                            lambda: False):
@@ -612,13 +628,13 @@ class McpTests(unittest.TestCase):
                         "params": {"name": "handoff",
                                    "arguments": {"path": "/nope.jsonl"}}}),
         ]) + "\n"
-        proc = sp.run(
-            [sys.executable, str(ROOT / "claude_handoff.py"), "--mcp"],
+        proc = sp.run(  # noqa: PLW1510 — returncode checked via replies
+            [sys.executable, "-m", "claude_handoff", "--mcp"], cwd=str(ROOT),
             input=req, capture_output=True, text=True, encoding="utf-8",
             timeout=60, env={**os.environ, "PYTHONUTF8": "1"})
         replies = {m["id"]: m for m in
-                   (json.loads(l) for l in proc.stdout.splitlines()
-                    if l.strip())}
+                   (json.loads(line) for line in
+                    proc.stdout.splitlines() if line.strip())}
         self.assertEqual(replies[1]["result"]["serverInfo"]["name"],
                          "claude-handoff")
         tools = {t["name"] for t in replies[2]["result"]["tools"]}
@@ -717,8 +733,8 @@ class ParallelMapTests(unittest.TestCase):
                           for i in range(10))
         with unittest.mock.patch.dict(ch.PROVIDERS["openai"],
                                       {"call": fake_call}), \
-                unittest.mock.patch.object(ch, "LLM_INPUT_CAP", 1000), \
-                unittest.mock.patch.object(ch, "CHUNK_CAP", 800), \
+                unittest.mock.patch.object(ch.llm, "LLM_INPUT_CAP", 1000), \
+                unittest.mock.patch.object(ch.llm, "CHUNK_CAP", 800), \
                 unittest.mock.patch.dict(ch.os.environ,
                                          {"OPENAI_API_KEY": "sk-test"}), \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -891,7 +907,7 @@ class OllamaTests(unittest.TestCase):
 
         import contextlib
         import io
-        with unittest.mock.patch.object(ch, "http_json", fake_http), \
+        with unittest.mock.patch.object(ch.llm, "http_json", fake_http), \
                 contextlib.redirect_stderr(io.StringIO()):
             out = ch.llm_summarize("ollama", None, "tiny transcript")
         self.assertEqual(out, "local summary")
@@ -905,7 +921,7 @@ class OllamaTests(unittest.TestCase):
 
         import contextlib
         import io
-        with unittest.mock.patch.object(ch, "http_json", fake_http), \
+        with unittest.mock.patch.object(ch.llm, "http_json", fake_http), \
                 contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as cm:
                 ch.llm_summarize("ollama", None, "x")
@@ -958,7 +974,8 @@ class RedactOutputTests(unittest.TestCase):
         import tempfile
         payload = json.dumps({"transcript_path": str(SECRET)})
         with tempfile.TemporaryDirectory() as td:
-            with unittest.mock.patch.object(ch, "HANDOFFS_DIR", Path(td)), \
+            with unittest.mock.patch.object(ch.integrations, "HANDOFFS_DIR",
+                                            Path(td)), \
                     unittest.mock.patch.object(sys, "stdin",
                                                io.StringIO(payload)), \
                     contextlib.redirect_stdout(io.StringIO()), \
@@ -1009,9 +1026,9 @@ class ZeroTrustTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td, \
                 unittest.mock.patch.dict(ch.PROVIDERS["claude-cli"],
                                          {"call": fake_call}), \
-                unittest.mock.patch.object(ch, "CACHE_DIR", Path(td)), \
-                unittest.mock.patch.object(ch, "LLM_INPUT_CAP", 1000), \
-                unittest.mock.patch.object(ch, "CHUNK_CAP", 800), \
+                unittest.mock.patch.object(ch.llm, "CACHE_DIR", Path(td)), \
+                unittest.mock.patch.object(ch.llm, "LLM_INPUT_CAP", 1000), \
+                unittest.mock.patch.object(ch.llm, "CHUNK_CAP", 800), \
                 contextlib.redirect_stderr(io.StringIO()):
             ch.llm_summarize("claude-cli", None, big)
             first_run = len(calls)

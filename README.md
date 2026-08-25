@@ -97,6 +97,8 @@ Then paste `handoff.md` into any other model. The document opens with instructio
 ## Commands run
 - python -m pytest tests/test_auth.py -q
 
+_🤖 2 subagent(s) contributed to the work above (--include-sidechains for their transcripts)._
+
 ## Conversation
 ### 🧑 User
 the login breaks on unicode passwords…
@@ -170,7 +172,8 @@ client never triggers paid LLM calls.
 ## Roadmap
 
 - Gemini exports as input (Google Takeout ships HTML only — bring a real, redacted export to build against)
-- Live token-cost estimates per provider
+- Session chains: auto-detect `/compact`-continued sessions and offer to merge the lineage (`--follow`)
+- Opt-in LLM summaries over MCP (`--mcp --allow-llm`)
 
 PRs welcome.
 

@@ -325,8 +325,10 @@ def run_brief_hook_mode() -> None:
         stamp = parse_stamp(text)
         warn = ""
         if stamp:
+            current = payload.get("transcript_path", "")
             newest = max((s.stat().st_mtime
-                          for s in find_sessions(project)), default=0)
+                          for s in find_sessions(project)
+                          if str(s) != current), default=0)
             if newest > stamp["newest_mtime"]:
                 warn = ("\n(warning: sessions newer than this brief "
                         "exist — refresh with `chf --brief`)\n")

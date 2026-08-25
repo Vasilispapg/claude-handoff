@@ -1409,6 +1409,35 @@ class BriefHookTests(unittest.TestCase):
                     ch.run_brief_hook_mode()
         self.assertIn("newer than this brief", buf.getvalue())
 
+    def test_injection_ignores_the_session_that_just_started(self):
+        import contextlib
+        import io
+        import tempfile
+        # the only "newer" session is the one this very hook fired for
+        payload = json.dumps({"cwd": "/home/vspapg/myapp",
+                              "transcript_path": str(FIXTURE)})
+        stale = (ch.brief.make_stamp(1, newest_mtime=10, distilled=0,
+                                     distilled_sessions=0, provider="none")
+                 + "\n# Project brief: x\n")
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                stale, encoding="utf-8")
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "cwd_project_filter",
+                        lambda cwd=None, *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "find_sessions",
+                        lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(sys, "stdin",
+                                               io.StringIO(payload)):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    ch.run_brief_hook_mode()
+        self.assertIn("project-memory", buf.getvalue())
+        self.assertNotIn("newer than this brief", buf.getvalue())
+
     def test_hook_stdin_emits_brief_as_context(self):
         import contextlib
         import io

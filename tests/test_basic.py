@@ -1653,6 +1653,18 @@ class BriefCategoryTests(unittest.TestCase):
             self.assertIn("actually diagnosed and resolved", prompt)
             self.assertIn("are not fixes", prompt)
 
+    def test_brief_opens_with_what_this_is(self):
+        # a brief you can't tell the product from fails its one job —
+        # the final reduce must lead with a project identity section.
+        # Deliberately ONLY in BRIEF_PROMPT: session-note prompts are
+        # cache keys, and identity synthesis needs no per-note help.
+        self.assertIn("## What this is", ch.brief.BRIEF_PROMPT)
+        self.assertIn("a stranger needs first", ch.brief.BRIEF_PROMPT)
+        for prompt in (ch.brief.SESSION_NOTE_PROMPT,
+                       ch.brief.SESSION_CHUNK_PROMPT,
+                       ch.brief.SESSION_NOTE_REDUCE_PROMPT):
+            self.assertNotIn("What this is", prompt)   # notes stay cached
+
     def test_commit_bullets_cap_head_omitted(self):
         commits = [(i, f"{i:040x}", f"subject{i}") for i in range(10)]
         out = ch.brief._commit_bullets(commits)

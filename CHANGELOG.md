@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The brief now says what you're building**: the distilled memory
+  opens with a `## What this is` section — the 2-3 sentences a stranger
+  (or another model) needs first: product, stack, current state. Added
+  only to the final reduce prompt, so every cached per-session note
+  survives — refreshing an existing brief re-runs a single LLM call.
+
 - **A distillation is never silent**: `--brief --llm` now prints its
   plan ("Distilling N session(s) — at least M LLM call(s)…") before the
   first call, then drives the same live progress machinery as the

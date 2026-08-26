@@ -1406,6 +1406,46 @@ class BriefTests(unittest.TestCase):
         self.assertIn("Fix login bug in auth.py", text)
         self.assertNotIn("Redis for drafts", text)   # -o: plain skeleton
 
+    def test_plan_line_prints_before_first_llm_call(self):
+        # the run must never look hung: the plan lands on stderr BEFORE
+        # the first (possibly minute-long) provider call starts
+        import contextlib
+        import io
+        buf = io.StringIO()
+        seen = {}
+
+        def fake(key, model, prompt):
+            seen.setdefault("at_first_call", buf.getvalue())
+            return "## Decisions\n- d [abc123]"
+
+        parsed = [ch.parse_session(FIXTURE)]
+        with unittest.mock.patch.dict(ch.PROVIDERS["claude-cli"],
+                                      {"call": fake}), \
+                contextlib.redirect_stderr(buf):
+            ch.brief.build_brief_llm(parsed, "x", "claude-cli", None,
+                                     use_cache=False)
+        self.assertIn("Distilling 1 session(s)", seen["at_first_call"])
+        self.assertIn("LLM call", seen["at_first_call"])
+
+    def test_chunked_note_announces_parts_and_labels_each_call(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        calls = []
+        parsed = ch.parse_session(FIXTURE)
+        st = ch.llm._new_progress(2)
+        st["tty"] = False
+        with self._fake_provider(calls), \
+                unittest.mock.patch.object(ch.brief, "NOTE_INPUT_CAP", 400), \
+                contextlib.redirect_stderr(buf):
+            ch.brief._session_note(parsed, "claude-cli", None,
+                                   redact=True, use_cache=False, st=st)
+        err = buf.getvalue()
+        self.assertRegex(err, r"\d+ parts")          # session plan upfront
+        self.assertIn("part 1/", err)                # every call is an event
+        self.assertGreater(st["done"], 2)            # bar advanced per call
+        self.assertEqual(st["done"], st["total"] - 1)  # only reduce slot left
+
     def test_monster_session_note_is_map_reduced(self):
         import contextlib
         import io

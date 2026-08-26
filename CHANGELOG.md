@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **A distillation is never silent**: `--brief --llm` now prints its
+  plan ("Distilling N session(s) — at least M LLM call(s)…") before the
+  first call, then drives the same live progress machinery as the
+  handoff pipeline — on a TTY a bar with elapsed time and ETA that ticks
+  *during* each call, one plain stderr line per event otherwise. Large
+  sessions announce their part count upfront and the bar's total grows
+  as parts are discovered; cache hits show as completed steps.
+
 - **`--llm claude-cli` always bills the CLI login**: a stray
   `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` exported in the shell is
   now scrubbed from the spawned `claude -p` — the env key used to win

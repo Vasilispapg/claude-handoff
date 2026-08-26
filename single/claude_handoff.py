@@ -2129,22 +2129,43 @@ def _sid(parsed: dict) -> str:
     return (parsed["meta"]["session_id"] or "?")[:8]
 
 
+def _announce(st: dict | None, text: str) -> None:
+    """One progress event: redrawn onto the live bar on a TTY, a plain
+    stderr line otherwise — a distillation must never look hung."""
+    if st is not None and st["tty"]:
+        _draw_progress(st, text)
+    else:
+        print(text, file=sys.stderr)
+
+
 def _cached_call(cfg: dict, key, model, provider: str, prompt: str,
-                 use_cache: bool) -> str:
-    """One retried LLM call behind the content-addressed note cache."""
+                 use_cache: bool, st: dict | None = None,
+                 label: str = "") -> str:
+    """One retried LLM call behind the content-addressed note cache,
+    drawn as one step of the shared progress bar when `st` is given."""
     cache = _chunk_cache_path(prompt, provider, model) if use_cache else None
     if cache is not None:
         hit = _cache_get(cache)
         if hit is not None:
+            if st is not None:
+                st["done"] += 1
+                _announce(st, f"{label} — cached")
             return hit
-    out = _call_with_retry(cfg["call"], key, model, prompt)
+    if st is None:
+        out = _call_with_retry(cfg["call"], key, model, prompt)
+    else:
+        out = _progress_step(
+            st, label,
+            lambda: _call_with_retry(cfg["call"], key, model, prompt))
+        st["done"] += 1
     if cache is not None:
         _cache_put(cache, out)
     return out
 
 
 def _session_note(parsed: dict, provider: str, model: str | None,
-                  redact: bool, use_cache: bool) -> str:
+                  redact: bool, use_cache: bool,
+                  st: dict | None = None) -> str:
     """One cached, retried LLM note for one session.
 
     Sessions beyond NOTE_INPUT_CAP are map-reduced INSIDE the session
@@ -2163,24 +2184,29 @@ def _session_note(parsed: dict, provider: str, model: str | None,
         prompt = SESSION_NOTE_PROMPT.format(
             sid=sid, when=fmt_ts(parsed["meta"]["first_ts"]),
             transcript=transcript)
-        return _cached_call(cfg, key, model, provider, prompt,
-                            use_cache)
+        return _cached_call(cfg, key, model, provider, prompt, use_cache,
+                            st, f"note {sid} ({len(transcript):,} chars)")
     chunks = _chunk_text(transcript, NOTE_INPUT_CAP)
+    if st is not None:
+        st["total"] += len(chunks)   # its chunk calls; the reduce was counted
+    _announce(st, f"brief note {sid}: {len(transcript):,} chars — "
+                  f"{len(chunks)} parts")
     parts = []
     for i, chunk in enumerate(chunks, 1):
         prompt = SESSION_CHUNK_PROMPT.format(i=i, n=len(chunks),
                                              sid=sid, transcript=chunk)
         parts.append(_cached_call(cfg, key, model, provider, prompt,
-                                  use_cache))
-        print(f"brief note {sid}: part {i}/{len(chunks)}",
-              file=sys.stderr)
+                                  use_cache, st,
+                                  f"note {sid} part {i}/{len(chunks)}"))
     prompt = SESSION_NOTE_REDUCE_PROMPT.format(
         sid=sid, notes=truncate("\n\n".join(parts), BRIEF_NOTES_CAP))
-    return _cached_call(cfg, key, model, provider, prompt, use_cache)
+    return _cached_call(cfg, key, model, provider, prompt, use_cache,
+                        st, f"note {sid}: merging {len(chunks)} parts")
 
 
 def _map_notes(parsed_list: list, provider: str, model: str | None,
-               redact: bool, use_cache: bool) -> list:
+               redact: bool, use_cache: bool,
+               st: dict | None = None) -> list:
     """A note per session — sequential for SERIAL_PROVIDERS, fanned out
     for API providers (same split as the chunk pipeline)."""
     notes: list = [None] * len(parsed_list)
@@ -2188,10 +2214,10 @@ def _map_notes(parsed_list: list, provider: str, model: str | None,
 
     def work(i: int) -> None:
         notes[i] = _session_note(parsed_list[i], provider, model,
-                                 redact, use_cache)
+                                 redact, use_cache, st)
         done[0] += 1
-        print(f"brief note {done[0]}/{len(parsed_list)} "
-              f"({_sid(parsed_list[i])})", file=sys.stderr)
+        _announce(st, f"brief note {done[0]}/{len(parsed_list)} "
+                      f"({_sid(parsed_list[i])})")
 
     if provider in SERIAL_PROVIDERS:
         for i in range(len(parsed_list)):
@@ -2216,7 +2242,14 @@ def build_brief_llm(parsed_list: list, label: str, provider: str,
                     model: str | None, focus: str | None = None,
                     redact: bool = True, use_cache: bool = True) -> str:
     """Deterministic skeleton + LLM-distilled memory sections."""
-    notes = _map_notes(parsed_list, provider, model, redact, use_cache)
+    serial = provider in SERIAL_PROVIDERS
+    print(f"Distilling {len(parsed_list)} session(s) with {provider} — "
+          f"at least {len(parsed_list) + 1} LLM call(s)"
+          + (", sequential" if serial else
+             f", up to {PARALLEL_WORKERS} in parallel")
+          + "; parts of large sessions add more.", file=sys.stderr)
+    st = _new_progress(len(parsed_list) + 1)   # ≥1 per session + reduce
+    notes = _map_notes(parsed_list, provider, model, redact, use_cache, st)
     joined = "\n\n".join(f"--- session {_sid(p)} ---\n{n}"
                          for p, n in zip(parsed_list, notes))
     focus_line = (f"\nAdditional instructions from the user — follow them "
@@ -2224,7 +2257,11 @@ def build_brief_llm(parsed_list: list, label: str, provider: str,
     prompt = BRIEF_PROMPT.format(label=label, focus=focus_line,
                                  notes=truncate(joined, BRIEF_NOTES_CAP))
     cfg, key, model = _resolve_provider(provider, model)
-    distilled = _call_with_retry(cfg["call"], key, model, prompt)
+    distilled = _progress_step(
+        st, f"synthesizing project memory from {len(parsed_list)} notes…",
+        lambda: _call_with_retry(cfg["call"], key, model, prompt))
+    st["done"] += 1
+    _progress_finish(st)
     return (build_brief_deterministic(parsed_list, label)
             + "\n## Distilled memory\n\n"
             + _demote_headings(distilled.strip()) + "\n")

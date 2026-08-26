@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.16.0 — 2026-08-26
 
 - **Plain `--brief` no longer discards a paid distillation**: rebuilding
   the free skeleton onto the stamped brief file now grafts the existing

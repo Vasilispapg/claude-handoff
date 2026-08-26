@@ -56,7 +56,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 
 # --------------------------------------------------------------------------- #

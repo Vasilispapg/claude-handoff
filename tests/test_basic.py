@@ -1841,8 +1841,9 @@ class HelperTests(unittest.TestCase):
     def test_tilde_collapses_home(self):
         home = Path.home()
         self.assertEqual(ch.textutil.tilde(home / "x" / "y.jsonl"),
-                         "~/x/y.jsonl")
-        self.assertEqual(ch.textutil.tilde(Path("/opt/z")), "/opt/z")
+                         str(Path("~") / "x" / "y.jsonl"))  # native seps
+        self.assertEqual(ch.textutil.tilde(Path("/opt/z")),
+                         str(Path("/opt/z")))
 
 
     def test_truncate_short_passthrough(self):

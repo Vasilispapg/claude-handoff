@@ -7,6 +7,14 @@
   (or another model) needs first: product, stack, current state. Added
   only to the final reduce prompt, so every cached per-session note
   survives — refreshing an existing brief re-runs a single LLM call.
+- **The brief maps state and hands over a resume plan**: a new
+  `## Where things stand` section separates shipped-and-verified from
+  in-flight (naming exactly where it stopped) from not-yet-started, and
+  `## Open threads` is now ordered by what a resuming session should
+  pick up first — concrete next action per bullet, tagged [in flight] /
+  [blocked] / [not started]. Citations now cover every section,
+  `## What this is` included; word budget 600 → 800. Reduce-prompt-only
+  again: cached notes survive, a refresh is one LLM call.
 
 - **A distillation is never silent**: `--brief --llm` now prints its
   plan ("Distilling N session(s) — at least M LLM call(s)…") before the

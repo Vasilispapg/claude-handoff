@@ -1665,6 +1665,20 @@ class BriefCategoryTests(unittest.TestCase):
                        ch.brief.SESSION_NOTE_REDUCE_PROMPT):
             self.assertNotIn("What this is", prompt)   # notes stay cached
 
+    def test_brief_maps_state_and_orders_next_steps(self):
+        # "what have we done and what not" needs its own map, and Open
+        # threads must read as the resume plan, not a bag of loose ends
+        p = ch.brief.BRIEF_PROMPT
+        self.assertIn("## Where things stand", p)
+        self.assertIn("done/not-done", p)
+        self.assertIn("in flight", p)
+        self.assertIn("resuming session", p)           # ordered pickup plan
+        self.assertIn("`## What this is` included", p)  # citations everywhere
+        for prompt in (ch.brief.SESSION_NOTE_PROMPT,
+                       ch.brief.SESSION_CHUNK_PROMPT,
+                       ch.brief.SESSION_NOTE_REDUCE_PROMPT):
+            self.assertNotIn("Where things stand", prompt)  # cache intact
+
     def test_commit_bullets_cap_head_omitted(self):
         commits = [(i, f"{i:040x}", f"subject{i}") for i in range(10)]
         out = ch.brief._commit_bullets(commits)

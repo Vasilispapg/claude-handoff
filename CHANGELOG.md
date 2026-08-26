@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **`--brief -o clipboard`**: ships the *current* brief — grafted
+  distillation included, like the default destination — straight to the
+  clipboard: one paste hands your project memory to any other model.
+  Previously this wrote a literal file named `clipboard`.
+- **`--brief --format json` fails loudly** instead of silently ignoring
+  the flag.
+
 ## 0.18.0 — 2026-08-26
 
 - **Curate what feeds the memory — `--exclude` and `--keep`**:

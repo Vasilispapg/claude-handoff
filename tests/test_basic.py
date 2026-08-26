@@ -1695,6 +1695,50 @@ class BriefCategoryTests(unittest.TestCase):
         self.assertEqual(ch.brief._commit_bullets([]), "")
 
 
+class BriefOutputTests(unittest.TestCase):
+    """-o clipboard composes with --brief (distillation included);
+    unsupported --format json fails loudly, never silently."""
+
+    def test_brief_to_clipboard_carries_the_distillation(self):
+        import contextlib
+        import io
+        import tempfile
+        copied = {}
+        with tempfile.TemporaryDirectory() as td:
+            old = ("<!-- claude-handoff-brief v=1 built=10 sessions=1 "
+                   "newest_mtime=10 distilled=10 distilled_sessions=1 "
+                   "provider=claude-cli -->\n"
+                   "# Project brief: old\n\n## Session timeline\n\n- old\n\n"
+                   "## Distilled memory\n\n- Redis for drafts [abc123]\n")
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                old, encoding="utf-8")
+            with unittest.mock.patch.object(
+                    ch.brief, "find_sessions",
+                    lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(
+                        ch.cli, "cwd_project_filter",
+                        lambda *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                               Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.cli, "_copy_clipboard",
+                        lambda doc: copied.setdefault("doc", doc)
+                        or "pbcopy"), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.main(["--brief", "-o", "clipboard"])
+            stored = (Path(td) / "-home-vspapg-myapp.md").read_text(
+                encoding="utf-8")
+        self.assertIn("- Redis for drafts [abc123]", copied["doc"])
+        self.assertIn("Fix login bug", copied["doc"])     # fresh skeleton
+        self.assertEqual(stored, old)          # store untouched by -o
+        self.assertFalse(Path("clipboard").exists())
+
+    def test_brief_format_json_is_a_loud_error(self):
+        with self.assertRaises(SystemExit) as cm:
+            ch.main(["--brief", "--format", "json"])
+        self.assertIn("--format json", str(cm.exception))
+
+
 class BriefExcludeTests(unittest.TestCase):
     """--exclude: leave sessions out of the living brief — everywhere,
     sticky across refreshes via the stamp, interactive when bare."""

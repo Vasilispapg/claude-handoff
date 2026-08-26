@@ -461,6 +461,10 @@ def _resolve_excludes(args: argparse.Namespace, old_stamp: dict | None,
 
 def _run_brief(args: argparse.Namespace) -> None:
     """--brief: whole-project memory document (see brief.py)."""
+    if args.format == "json":
+        raise SystemExit("--brief --format json isn't supported (yet) — "
+                         "the brief is a markdown document; --format "
+                         "applies to handoffs and --list.")
     scope = args.project
     if isinstance(scope, list):
         if len(scope) > 1:
@@ -476,7 +480,12 @@ def _run_brief(args: argparse.Namespace) -> None:
     if not parsed_list:
         raise SystemExit(f"No sessions to brief for {scope!r} — "
                          f"run --list.")
-    prior = brief_path(scope) if args.output == "handoff.md" else None
+    # clipboard is a way to SHIP the current brief (e.g. paste the
+    # project memory into another model), so it grafts like the default
+    # destination; any other -o stays a plain exported skeleton
+    to_clipboard = args.output in ("clipboard", "clip")
+    prior = (brief_path(scope)
+             if args.output == "handoff.md" or to_clipboard else None)
     old = (prior.read_text(encoding="utf-8")
            if prior is not None and prior.is_file() else None)
     old_stamp = parse_stamp(old) if old else None
@@ -531,6 +540,13 @@ def _run_brief(args: argparse.Namespace) -> None:
         stamp = make_stamp(len(parsed_list), newest_mtime, 0, 0,
                            "none", exclude=exc, keep=keep)
     doc = stamp + "\n" + doc
+    if to_clipboard:
+        tool = _copy_clipboard(doc)
+        print(f"Copied brief to clipboard via {tool} ({len(doc):,} chars, "
+              f"≈{_fmt_tokens(len(doc) // 4)} tokens, "
+              f"{len(parsed_list)} sessions) — paste away.",
+              file=sys.stderr)
+        return
     dest = (brief_path(scope) if args.output == "handoff.md"
             else args.output)
     if str(dest) == "-":

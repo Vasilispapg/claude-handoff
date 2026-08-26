@@ -159,7 +159,10 @@ session out (a duplicate, an experiment — bare `--exclude` opens a
 numbered picker), and `--keep first:2,last:20` windows a huge history to
 the founding sessions plus a sliding recent window. Both are **sticky** —
 stored in the brief's stamp, so hooks and later refreshes keep honoring
-them until you change them (`--exclude none`, `--keep all`).
+them until you change them (`--exclude none`, `--keep all`). And
+`chf --brief -o clipboard` ships the current brief — distillation
+included — straight to the clipboard, one paste away from handing your
+project memory to another model.
 
 ```bash
 chf --install-brief-hook
@@ -453,6 +456,9 @@ Set `PYTHONUTF8=1` (the CI runs the whole suite that way).
 
 - Gemini exports as input (Google Takeout ships HTML only — bring a real, redacted export to build against)
 - Session chains: auto-detect `/compact`-continued sessions and offer to merge the lineage (`--follow`)
+- `--brief` over web exports (`conversations.json`) — standing memory from a claude.ai/ChatGPT history
+- Thematic memory: `--brief --grep X` distills only the sessions that talked about X
+- `--keep since:7d` — time windows alongside the count windows
 
 PRs welcome.
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Git-aware freshness**: the brief now knows the repo, not just the
+  session store. The skeleton carries a `Repo HEAD` line (short hash +
+  date + subject of the last commit); the SessionEnd refresh and the
+  SessionStart injection warn when commits landed *after* the last
+  distillation ("N commit(s) newer than this memory"), so outdated
+  memory is never trusted silently. Read straight from
+  `.git/logs/HEAD` — no `git` subprocess, keeping the
+  deterministic-mode invariant; silently absent outside a repo.
 - **Brief layout fix**: the LLM-distilled sections (Decisions / Fixed /
   Conventions / Open threads) now render as `###` sub-headings nested
   under `## Distilled memory` instead of rivaling it. Demoted

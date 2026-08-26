@@ -1422,6 +1422,61 @@ class BriefFreshnessTests(unittest.TestCase):
         self.assertIn("newer session(s) since this distillation", text)
         self.assertIn("claude-handoff-brief v=1", text)   # re-stamped
 
+    def _fake_repo(self, td, entries):
+        """Write a synthetic .git/logs/HEAD reflog — (ts, sha, subject)."""
+        logs = Path(td) / ".git" / "logs"
+        logs.mkdir(parents=True)
+        lines = [f"{'0' * 40} {sha} You <y@x> {ts} +0200\tcommit: {subject}"
+                 for ts, sha, subject in entries]
+        (logs / "HEAD").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_brief_shows_repo_head_from_reflog(self):
+        import tempfile
+        parsed = ch.parse_session(FIXTURE)
+        with tempfile.TemporaryDirectory() as td:
+            self._fake_repo(td, [(1000, "a" * 40, "init"),
+                                 (2000, "b" * 40, "add rate limiter")])
+            doc = ch.brief.build_brief_deterministic([parsed], td)
+        self.assertIn("Repo HEAD `bbbbbbbb`", doc)     # newest entry wins
+        self.assertIn("add rate limiter", doc)
+        doc2 = ch.brief.build_brief_deterministic([parsed], "home/x/y")
+        self.assertNotIn("Repo HEAD", doc2)            # no repo → no line
+
+    def test_update_notes_commits_after_distillation(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+                tempfile.TemporaryDirectory() as repo:
+            self._fake_repo(repo, [(1000, "a" * 40, "init"),
+                                   (2000, "b" * 40, "fix parser")])
+            old = ("<!-- claude-handoff-brief v=1 built=10 sessions=1 "
+                   "newest_mtime=10 distilled=1500 distilled_sessions=1 "
+                   "provider=claude-cli -->\n"
+                   "# Project brief: old\n\n## Session timeline\n\n- old\n\n"
+                   "## Distilled memory\n\n- Redis for drafts [abc123]\n")
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                old, encoding="utf-8")
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.brief, "find_sessions",
+                        lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(
+                        ch.brief, "brief_label",
+                        lambda *a, **k: repo), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.brief.update_brief_skeleton("-home-vspapg-myapp")
+                ch.brief.update_brief_skeleton("-home-vspapg-myapp")
+            text = (Path(td) / "-home-vspapg-myapp.md") \
+                .read_text(encoding="utf-8")
+        # one commit (ts 2000) landed after the distillation (ts 1500)
+        self.assertIn("1 commit(s) landed after this distillation", text)
+        self.assertIn("fix parser", text)
+        # refreshing twice never stacks the note
+        self.assertEqual(text.count("landed after this distillation"), 1)
+        self.assertIn("- Redis for drafts [abc123]", text)  # distilled kept
+
     def test_update_leaves_unknown_files_alone(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td:
@@ -1716,6 +1771,42 @@ class BriefHookTests(unittest.TestCase):
                     ch.run_brief_hook_mode()
         self.assertIn("project-memory", buf.getvalue())
         self.assertNotIn("newer than this brief", buf.getvalue())
+
+    def test_injection_warns_when_repo_moved_after_distillation(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+                tempfile.TemporaryDirectory() as repo:
+            logs = Path(repo) / ".git" / "logs"
+            logs.mkdir(parents=True)
+            (logs / "HEAD").write_text(
+                f"{'0' * 40} {'b' * 40} You <y@x> 2000 +0200"
+                "\tcommit: fix parser\n", encoding="utf-8")
+            payload = json.dumps({"cwd": repo})
+            stale = (ch.brief.make_stamp(1, newest_mtime=9999999999,
+                                         distilled=1500,
+                                         distilled_sessions=1,
+                                         provider="claude-cli")
+                     + "\n# Project brief: x\n")
+            (Path(td) / "-r.md").write_text(stale, encoding="utf-8")
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "cwd_project_filter",
+                        lambda cwd=None, *a, **k: "-r"), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "find_sessions",
+                        lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(sys, "stdin",
+                                               io.StringIO(payload)):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    ch.run_brief_hook_mode()
+        out = buf.getvalue()
+        # the commit at ts 2000 postdates the distillation at ts 1500
+        self.assertIn("commit(s) newer than this memory", out)
+        self.assertNotIn("newer than this brief", out)   # sessions are fine
 
     def test_hook_stdin_emits_brief_as_context(self):
         import contextlib

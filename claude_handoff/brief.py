@@ -60,6 +60,44 @@ def _activity_rollup(parsed_list: list, top: int = 15) -> list:
     return sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))[:top]
 
 
+def _git_reflog(cwd) -> list:
+    """Commit entries (ts, sha, subject) of `.git/logs/HEAD`, oldest
+    first — read straight from disk because the deterministic path may
+    spawn no subprocess. Follows worktree/submodule `.git` files;
+    returns [] whenever anything is unreadable (best-effort, like the
+    cache)."""
+    try:
+        git = Path(cwd) / ".git"
+        if git.is_file():
+            first = git.read_text(encoding="utf-8").splitlines()[0]
+            if not first.startswith("gitdir:"):
+                return []
+            git = (Path(cwd) / first.split(":", 1)[1].strip()).resolve()
+        entries = []
+        text = (git / "logs" / "HEAD").read_text(encoding="utf-8",
+                                                 errors="replace")
+        for line in text.splitlines():
+            head, _, action = line.partition("\t")
+            parts = head.split()
+            if len(parts) < 4 or not action.startswith("commit"):
+                continue
+            entries.append((int(parts[-2]), parts[1],
+                            action.split(":", 1)[-1].strip()))
+        return entries
+    except (OSError, ValueError, IndexError):
+        return []
+
+
+def _git_head(cwd):
+    """Latest local commit (ts, sha, subject), or None outside a repo."""
+    log = _git_reflog(cwd)
+    return log[-1] if log else None
+
+
+def _git_commits_since(cwd, ts: int) -> int:
+    return sum(1 for t, _, _ in _git_reflog(cwd) if t > ts)
+
+
 def build_brief_deterministic(parsed_list: list, label: str) -> str:
     """No-LLM digest: timeline of every session + cross-session activity.
     The --llm variant distills decisions/conventions; this is the honest,
@@ -72,8 +110,14 @@ def build_brief_deterministic(parsed_list: list, label: str) -> str:
     out = [f"# Project brief: {label}", "",
            f"_Distilled from {len(parsed_list)} sessions, "
            f"{fmt_ts(first)} → {fmt_ts(last)} — by claude-handoff. "
-           f"Citations are session ids (`--name ID` opens one)._", "",
-           "## Session timeline", ""]
+           f"Citations are session ids (`--name ID` opens one)._"]
+    head = _git_head(label)
+    if head:
+        ts, sha, subject = head
+        out += ["", f"_Repo HEAD `{sha[:8]}` — last commit "
+                    f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))}: "
+                    f"{one_line(subject, 60)}_"]
+    out += ["", "## Session timeline", ""]
     if len(parsed_list) > len(shown):
         out.append(f"_{len(parsed_list) - len(shown)} earlier "
                    f"session(s) omitted — chf --list for all._")
@@ -269,6 +313,8 @@ STAMP_RE = re.compile(
 DISTILLED_MARK = "\n## Distilled memory\n"
 _FRESHNESS_NOTE_RE = re.compile(
     r"\n_\d+ newer session\(s\) since this distillation[^\n]*_\n")
+_GIT_NOTE_RE = re.compile(
+    r"\n_\d+ commit\(s\) landed after this distillation[^\n]*_\n")
 
 
 def make_stamp(sessions: int, newest_mtime: int, distilled: int,
@@ -331,18 +377,29 @@ def update_brief_skeleton(project: str) -> bool:
     parsed_list, newest = load_project_sessions(project)
     if not parsed_list:
         return False
-    doc = build_brief_deterministic(parsed_list,
-                                    brief_label(parsed_list, project))
+    label = brief_label(parsed_list, project)
+    doc = build_brief_deterministic(parsed_list, label)
     distilled = split_distilled(old)
     if distilled is not None:
         distilled = _FRESHNESS_NOTE_RE.sub("\n", distilled)
+        distilled = _GIT_NOTE_RE.sub("\n", distilled)
+        notes = ""
         newer = len(parsed_list) - stamp["distilled_sessions"]
         if stamp["distilled"] and newer > 0:
-            note = (f"\n_{newer} newer session(s) since this distillation "
-                    f"— refresh with `chf --brief --llm "
-                    f"{stamp['provider']}`._\n")
+            notes += (f"\n_{newer} newer session(s) since this "
+                      f"distillation — refresh with `chf --brief --llm "
+                      f"{stamp['provider']}`._\n")
+        commits = (_git_commits_since(label, stamp["distilled"])
+                   if stamp["distilled"] else 0)
+        if commits:
+            _, sha, subject = _git_head(label)
+            notes += (f"\n_{commits} commit(s) landed after this "
+                      f"distillation (HEAD `{sha[:8]}` — "
+                      f"{one_line(subject, 60)}) — the distilled memory "
+                      f"may lag the repo._\n")
+        if notes:
             distilled = distilled.replace(DISTILLED_MARK,
-                                          DISTILLED_MARK + note, 1)
+                                          DISTILLED_MARK + notes, 1)
         doc = doc + distilled
     new_stamp = make_stamp(len(parsed_list), newest, stamp["distilled"],
                            stamp["distilled_sessions"], stamp["provider"])

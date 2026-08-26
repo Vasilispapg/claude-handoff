@@ -10,7 +10,12 @@ from datetime import datetime
 from pathlib import Path
 
 from ._version import __version__
-from .brief import brief_path, parse_stamp, update_brief_skeleton
+from .brief import (
+    _git_commits_since,
+    brief_path,
+    parse_stamp,
+    update_brief_skeleton,
+)
 from .discovery import (
     _newest_meaningful_session,
     cwd_project_filter,
@@ -339,6 +344,14 @@ def run_brief_hook_mode() -> None:
                 stale_note = ("\n(warning: sessions newer than this "
                               "brief exist — refresh with "
                               "`chf --brief`)\n")
+            commits = (_git_commits_since(payload["cwd"],
+                                          stamp["distilled"])
+                       if stamp["distilled"] else 0)
+            if commits:
+                stale_note += (f"\n(warning: {commits} commit(s) newer "
+                               f"than this memory landed in the repo — "
+                               f"refresh with `chf --brief --llm "
+                               f"{stamp['provider']}`)\n")
         sys.stdout.write(
             '<project-memory source="claude-handoff" '
             'refresh="chf --brief">\n'

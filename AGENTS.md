@@ -111,7 +111,10 @@ Import direction flows strictly downward (no cycles): `textutil` →
 - Rendering (`render.py`): `render_header`, `render_activity`, `render_transcript`,
   `render_footer`, `build_deterministic`
 - Project memory (`brief.py`): `build_brief_deterministic` (timeline +
-  activity rollup, capped at `TIMELINE_CAP`), `build_brief_llm`
+  activity rollup, capped at `TIMELINE_CAP`; `Repo HEAD` line via the
+  git helpers), `_git_reflog`/`_git_head`/`_git_commits_since` (repo
+  freshness read straight from `.git/logs/HEAD` — never a `git`
+  subprocess), `build_brief_llm`
   (per-session notes, cached by prompt+content hash, then one reduce —
   `SESSION_NOTE_PROMPT` / `BRIEF_PROMPT`), `brief_path` (~/.claude/briefs),
   freshness stamps (`make_stamp`/`parse_stamp`), `update_brief_skeleton`

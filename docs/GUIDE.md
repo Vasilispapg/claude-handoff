@@ -35,7 +35,11 @@ burning twenty tool calls rediscovering the codebase.
 
 If sessions newer than the brief exist, the injection carries a warning
 (`sessions newer than this brief exist — refresh with chf --brief`), so
-neither you nor the model trusts stale memory silently.
+neither you nor the model trusts stale memory silently. Same for the
+repo itself: the brief shows the current `Repo HEAD` (hash + date +
+last commit subject), and when commits landed after the last
+distillation — even ones made entirely outside Claude — the injection
+warns `N commit(s) newer than this memory landed in the repo`.
 
 ## 11:30 — the session dies mid-debugging
 

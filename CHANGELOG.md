@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Brief layout fix**: the LLM-distilled sections (Decisions / Fixed /
+  Conventions / Open threads) now render as `###` sub-headings nested
+  under `## Distilled memory` instead of rivaling it. Demoted
+  deterministically at assembly — prompts unchanged, so every cached
+  session note survives.
+
 ## 0.15.0 — 2026-08-26
 
 - **No size limit for project memory**: sessions beyond the per-note

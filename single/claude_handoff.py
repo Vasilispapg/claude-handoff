@@ -1980,6 +1980,15 @@ def _map_notes(parsed_list: list, provider: str, model: str | None,
     return notes
 
 
+_TOP_HEADING_RE = re.compile(r"^#{1,2}(?=\s)", re.MULTILINE)
+
+
+def _demote_headings(text: str) -> str:
+    """H1/H2 in LLM output become H3 so the distilled sections nest
+    under '## Distilled memory' instead of rivaling it."""
+    return _TOP_HEADING_RE.sub("###", text)
+
+
 def build_brief_llm(parsed_list: list, label: str, provider: str,
                     model: str | None, focus: str | None = None,
                     redact: bool = True, use_cache: bool = True) -> str:
@@ -1994,7 +2003,8 @@ def build_brief_llm(parsed_list: list, label: str, provider: str,
     cfg, key, model = _resolve_provider(provider, model)
     distilled = _call_with_retry(cfg["call"], key, model, prompt)
     return (build_brief_deterministic(parsed_list, label)
-            + "\n## Distilled memory\n\n" + distilled.strip() + "\n")
+            + "\n## Distilled memory\n\n"
+            + _demote_headings(distilled.strip()) + "\n")
 
 
 TIMELINE_CAP = 20            # timeline bullets injected per session start

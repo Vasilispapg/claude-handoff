@@ -1292,6 +1292,27 @@ class BriefTests(unittest.TestCase):
                 .read_text(encoding="utf-8")
         self.assertIn("decisions here", text)
 
+    def test_llm_brief_demotes_distilled_headings(self):
+        import contextlib
+        import io
+
+        def fake_call(key, model, prompt):
+            return ("## Decisions\n- chose X [abc123]\n\n"
+                    "## Open threads\n- pending Y [abc123]")
+
+        parsed_list = [ch.parse_session(FIXTURE)]
+        with unittest.mock.patch.dict(ch.PROVIDERS["claude-cli"],
+                                      {"call": fake_call}), \
+                contextlib.redirect_stderr(io.StringIO()):
+            doc = ch.build_brief_llm(parsed_list, "home/vspapg/myapp",
+                                     "claude-cli", None, use_cache=False)
+        distilled = doc[doc.index("## Distilled memory"):]
+        # LLM section headings nest UNDER the marker, never rival it
+        self.assertIn("### Decisions", distilled)
+        self.assertIn("### Open threads", distilled)
+        self.assertNotIn("\n## Decisions", distilled)
+        self.assertIn("## Session timeline", doc)   # skeleton stays H2
+
     def test_monster_session_note_is_map_reduced(self):
         import contextlib
         import io

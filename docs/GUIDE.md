@@ -22,7 +22,7 @@ context:
 # Project brief: /home/you/shop-api
 ...
 ## Distilled memory
-## Decisions
+### Decisions
 - JWT lives in httpOnly cookies, not localStorage — smaller XSS surface [a1b2c3d4]
 ...
 </project-memory>

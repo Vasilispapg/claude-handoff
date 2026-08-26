@@ -11,6 +11,8 @@
   also register PreCompact — a handoff snapshot before compaction
   squeezes detail away, and a free brief-skeleton refresh
   mid-session.
+- Session paths in messages are now ~-collapsed; the README opens
+  with a 5-second vhs demo (`docs/assets/demo.tape` regenerates it).
 - **Tolerant, not mute**: hooks now report swallowed errors on stderr
   (still exit 0, stdout untouched); `--grep` says how many unreadable
   files it skipped; new `--debug` flag / `CLAUDE_HANDOFF_DEBUG=1`

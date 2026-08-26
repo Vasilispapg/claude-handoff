@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **`--llm claude-cli` always bills the CLI login**: a stray
+  `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` exported in the shell is
+  now scrubbed from the spawned `claude -p` — the env key used to win
+  over the subscription login, failing runs with "Credit balance is too
+  low" on an empty Console account (and silently rebilling on a funded
+  one).
+
 ## 0.17.0 — 2026-08-26
 
 - **The transcript is a digest by default**: the `## Conversation`

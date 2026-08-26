@@ -209,8 +209,11 @@ byte-identical outputs on the fixtures and a real session, before/after
   docs over hardcoding bleeding-edge ids.
 - `_call_claude_cli` scrubs `CLAUDE*` env vars (except
   `CLAUDE_CODE_OAUTH_TOKEN`) before spawning `claude -p`, so nested runs
-  from inside a Claude Code session authenticate like a fresh CLI. Don't
-  remove the scrub.
+  from inside a Claude Code session authenticate like a fresh CLI — and
+  drops `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, because `claude -p`
+  prefers an exported key over the login and would silently rebill (or
+  fail on empty Console credit) a call this mode promises the
+  subscription pays for. Don't remove the scrub.
 - Tests patch names **in the module that uses them** (e.g.
   `ch.discovery.find_sessions` vs `ch.cli.find_sessions`) — intra-package
   imports are `from .module import name`, so patching the package root

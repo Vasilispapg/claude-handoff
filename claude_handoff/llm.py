@@ -138,9 +138,13 @@ def _call_claude_cli(key: str | None, model: str | None, prompt: str) -> str:
     if model:
         cmd += ["--model", model]
     # Scrub host-session variables so a nested run (claude-handoff invoked
-    # from inside a Claude Code session) authenticates like a fresh CLI.
+    # from inside a Claude Code session) authenticates like a fresh CLI,
+    # and drop stray API-key vars: `claude -p` prefers an exported
+    # ANTHROPIC_API_KEY over the login, silently rebilling the call this
+    # mode promises the subscription pays for.
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith("CLAUDE") or k == "CLAUDE_CODE_OAUTH_TOKEN"}
+           if (not k.startswith("CLAUDE") or k == "CLAUDE_CODE_OAUTH_TOKEN")
+           and k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
     try:
         proc = subprocess.run(
             cmd, input=prompt, capture_output=True, text=True,

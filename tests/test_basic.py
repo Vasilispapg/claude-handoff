@@ -297,6 +297,37 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("haiku", captured["cmd"])
         self.assertIn("the transcript", captured["input"])
 
+    def test_claude_cli_scrubs_stray_api_key(self):
+        # --llm claude-cli promises the subscription pays: an exported
+        # ANTHROPIC_API_KEY must not silently rebill the call (`claude -p`
+        # prefers the env key over the login — empty Console credits then
+        # fail the run with "Credit balance is too low")
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env")
+
+            class P:
+                returncode = 0
+                stdout = json.dumps({"result": "ok"})
+                stderr = ""
+            return P()
+
+        stray = {"ANTHROPIC_API_KEY": "sk-stray",
+                 "ANTHROPIC_AUTH_TOKEN": "tok-stray",
+                 "CLAUDE_CODE_OAUTH_TOKEN": "oauth-keep",
+                 "CLAUDE_PID": "123"}
+        with unittest.mock.patch.dict(os.environ, stray), \
+                unittest.mock.patch.object(ch.subprocess, "run", fake_run), \
+                unittest.mock.patch.object(ch.shutil, "which",
+                                           lambda _: "/usr/bin/claude"):
+            ch.llm_summarize("claude-cli", None, "x")
+        env = captured["env"]
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
+        self.assertNotIn("CLAUDE_PID", env)            # host-session var
+        self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", env)  # nested auth works
+
     def test_claude_cli_missing_binary(self):
         with unittest.mock.patch.object(ch.shutil, "which", lambda _: None):
             with self.assertRaises(SystemExit) as cm:

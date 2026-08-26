@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.17.0 — 2026-08-26
 
 - **The transcript is a digest by default**: the `## Conversation`
   section now renders one condensed bullet per turn (user ~300 chars,

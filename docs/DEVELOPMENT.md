@@ -98,6 +98,7 @@ fragile parsing of that result text.
 | Config defaults, v0.12.0 | `~/.config/claude-handoff/config.json` feeds `argparse.set_defaults`, so precedence is CLI flag > config > built-in with zero custom merging logic. Allow-listed keys only; `no_redact` is deliberately excluded — weakening redaction must be explicit per run. Broken configs warn and are ignored, never fatal. |
 | MCP LLM opt-in (`--allow-llm`), v0.12.0 | The MCP server stays deterministic by default ("no implicit paid calls"); starting it with `--allow-llm` adds `llm`/`model`/`focus` to the handoff tool schema, so cost is a server-operator decision, never a client's. |
 | Project memory (`--brief` + SessionStart hook), v0.13.0 | The store's unique asset is the user's ENTIRE history; distilling it into one cited brief and injecting it at session start turns claude-handoff from a handoff tool into a local long-term memory layer. Deterministic skeleton (timeline + rollup) is always factual; the LLM adds Decisions/Fixed/Conventions/Open-threads sections with per-bullet session citations (never-invent, verifiable). Per-session notes are cached by prompt+content hash — refreshes pay only for new sessions plus one reduce. Injection uses the SessionStart hook's plain-stdout-becomes-context contract (matcher startup\|resume\|clear\|compact); hooks never call LLMs — the SessionEnd hook auto-refreshes only the free factual skeleton (existing, stamped briefs only — it never creates files), while distillation stays an explicit user command. A machine-readable stamp (sessions count, newest mtime, distillation age) makes staleness visible: the file gets a "N newer sessions since this distillation" note and the injection adds a warning when the brief lags the store. Timeline is capped at 20 bullets so injection cost stays bounded. |
+| Injection defense + PreCompact hooks, v0.14.0 | Transcripts embed untrusted external text (tool results, pasted docs); the LLM consumption points (SUMMARY/CHUNK/NOTE/BRIEF prompts), the handoff preamble, and the brief injection wrapper now all frame it as data-not-instructions, pinned by tests — a mitigation, not a proof. Both hook installers also register PreCompact (matcher manual\|auto): a handoff snapshot before compaction squeezes detail away, and a free brief-skeleton refresh mid-session. CHUNK_PROMPT changed → CACHE_VERSION bumped to 2. |
 | Picker multi-select, v0.12.0 | `-i` accepts `1,3` / `2-4` (`_parse_pick`) and merges the picked sessions through the same machinery as `--merge` — composition over new code paths. |
 
 ## 4. Pipeline architecture
@@ -243,6 +244,10 @@ text bumped the counter. Fixed with a per-record `added_text` flag.
   identity (home paths, emails, IPs, username), not just secrets.
 - *LLM output*: untrusted text — only ever written into markdown, never
   executed or parsed as commands.
+- *LLM input & downstream readers* (v0.14.0): transcript content fed to
+  summarizers, and our own outputs read by receiving models, are framed as
+  data-not-instructions at every point (prompts, handoff preamble, brief
+  injection wrapper). Prompt-level guards are mitigation, not proof.
 - *Subprocess (`claude-cli`)*: fixed argv list (no `shell=True`), scrubbed
   environment, hard timeout, stdout parsed strictly as JSON.
 - *Network*: only under `--llm`, only to the three hardcoded provider

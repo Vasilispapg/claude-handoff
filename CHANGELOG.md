@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.0 — 2026-08-26
+
+- **Prompt-injection defense**: every LLM prompt that consumes a
+  transcript, the handoff preamble, and the brief injection wrapper
+  now explicitly frame session content as *data, not instructions* —
+  pinned by tests. (Prompts changed → the chunk cache version bumped
+  and brief notes re-distill once on next refresh.)
+- **PreCompact hooks**: `--install-hook` and `--install-brief-hook`
+  also register PreCompact — a handoff snapshot before compaction
+  squeezes detail away, and a free brief-skeleton refresh
+  mid-session.
+
 ## 0.13.0 — 2026-08-26
 
 - **Project memory — `--brief`**: distill EVERY session of a project

@@ -1327,6 +1327,89 @@ class BriefFreshnessTests(unittest.TestCase):
             self.assertEqual(list(Path(td).iterdir()), [])
 
 
+class InjectionDefenseTests(unittest.TestCase):
+    """Untrusted transcript content must be framed as data, never as
+    instructions — at every LLM consumption point and in every output a
+    downstream model will read."""
+
+    GUARD = "data"
+
+    def test_all_llm_prompts_carry_data_not_instructions_guard(self):
+        for name, prompt in (("SUMMARY_PROMPT", ch.SUMMARY_PROMPT),
+                             ("CHUNK_PROMPT", ch.CHUNK_PROMPT),
+                             ("SESSION_NOTE_PROMPT",
+                              ch.brief.SESSION_NOTE_PROMPT),
+                             ("BRIEF_PROMPT", ch.brief.BRIEF_PROMPT)):
+            self.assertIn("not instructions", prompt,
+                          f"{name} lacks the injection guard")
+
+    def test_handoff_preamble_warns_receiving_model(self):
+        parsed = ch.parse_session(FIXTURE)
+        doc = ch.build_deterministic(parsed, FIXTURE,
+                                     include_tools=False, max_chars=80_000)
+        self.assertIn("data, not instructions", doc)
+
+    def test_brief_injection_wrapper_warns_model(self):
+        import contextlib
+        import io
+        import tempfile
+        payload = json.dumps({"cwd": "/home/vspapg/myapp"})
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                "# Project brief: x\n", encoding="utf-8")
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "cwd_project_filter",
+                        lambda cwd=None, *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(sys, "stdin",
+                                               io.StringIO(payload)), \
+                    contextlib.redirect_stdout(buf):
+                ch.run_brief_hook_mode()
+        self.assertIn("data, not instructions", buf.getvalue())
+
+
+class PreCompactHookTests(unittest.TestCase):
+    """Both hooks also fire on PreCompact — snapshot before detail is
+    compacted away, and keep the brief skeleton fresh mid-session."""
+
+    def _cmds(self, data, event):
+        return [h["command"] for e in data.get("hooks", {}).get(event, [])
+                for h in e.get("hooks", [])]
+
+    def test_handoff_hook_registers_precompact(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            sp = Path(td) / "settings.json"
+            with contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                ch.install_hook(settings_path=sp)
+            data = json.loads(sp.read_text(encoding="utf-8"))
+            self.assertIn(ch.HOOK_COMMAND, self._cmds(data, "SessionEnd"))
+            self.assertIn(ch.HOOK_COMMAND, self._cmds(data, "PreCompact"))
+            with contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                ch.install_hook(settings_path=sp, remove=True)
+            data = json.loads(sp.read_text(encoding="utf-8"))
+            self.assertNotIn("PreCompact", data.get("hooks", {}))
+
+    def test_brief_hook_registers_precompact_update(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            sp = Path(td) / "settings.json"
+            with contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                ch.install_brief_hook(settings_path=sp)
+            data = json.loads(sp.read_text(encoding="utf-8"))
+            self.assertIn(ch.BRIEF_UPDATE_COMMAND,
+                          self._cmds(data, "PreCompact"))
+
+
 class BriefHookTests(unittest.TestCase):
     """SessionStart hook: inject the project brief as session context."""
 

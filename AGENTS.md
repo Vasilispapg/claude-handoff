@@ -52,6 +52,10 @@ Orientation — read in this order, only as far as your task needs:
 - **Never invent transcript content.** The exporter reorganizes and
   truncates; it must not fabricate. LLM outputs that claim facts carry
   session citations so they stay verifiable.
+- **Untrusted content stays data.** Transcripts embed arbitrary external
+  text; every prompt that consumes them, the handoff preamble, and the
+  brief injection wrapper carry a data-not-instructions guard (pinned by
+  `InjectionDefenseTests` — keep the phrase intact when editing prompts).
 - **Redact before egress.** Secret-shaped strings are stripped from
   anything sent to an LLM *and* from every final document (`redact_secrets`
   via `redact_doc` — a written or pasted handoff is egress too); default on,

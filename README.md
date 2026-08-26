@@ -157,9 +157,14 @@ newer sessions exist. Fully local; redaction applies as everywhere.
 ## Make it automatic
 
 ```bash
-chf --install-hook                 # SessionEnd → handoff to ~/.claude/handoffs/
-chf --install-brief-hook           # SessionStart/End → project memory (above)
+chf --install-hook                 # SessionEnd + PreCompact → handoff to ~/.claude/handoffs/
+chf --install-brief-hook           # SessionStart/End + PreCompact → project memory (above)
 ```
+
+PreCompact matters: right before Claude Code compacts a long session's
+context, both hooks snapshot state — the handoff preserves detail that
+compaction is about to squeeze away, and the brief skeleton stays fresh
+mid-session.
 
 Both edit `~/.claude/settings.json` non-destructively, are idempotent, and
 have matching `--uninstall-*` flags. Hook failures never break the host
@@ -266,6 +271,11 @@ and every run reports the output's ≈token size.
   into public issues and forums.
 - `--llm claude-cli` and `--llm ollama` keep everything inside accounts and
   machines you already control.
+- **Prompt-injection defense**: transcripts routinely embed untrusted text
+  (web pages in tool results, pasted READMEs). Every prompt that consumes
+  a transcript, the handoff preamble, and the brief injection wrapper all
+  frame that content as *data, not instructions* — pinned by tests. A
+  mitigation, not a proof; the parser itself never executes anything.
 
 ## Config (optional)
 

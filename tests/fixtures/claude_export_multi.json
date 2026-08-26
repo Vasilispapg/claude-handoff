@@ -1,0 +1,26 @@
+[
+  {
+    "uuid": "aaaa1111-0000-0000-0000-000000000001",
+    "name": "Design the onboarding flow",
+    "created_at": "2026-08-20T09:00:00Z",
+    "updated_at": "2026-08-20T10:00:00Z",
+    "chat_messages": [
+      {"sender": "human", "text": "Design the onboarding flow for the app", "created_at": "2026-08-20T09:00:00Z"},
+      {"sender": "assistant", "text": "Proposed a three-step onboarding with e-mail verification first.", "created_at": "2026-08-20T09:01:00Z"},
+      {"sender": "human", "text": "Make step two optional", "created_at": "2026-08-20T09:02:00Z"},
+      {"sender": "assistant", "text": "Done - step two is optional now, and the copy explains why.", "created_at": "2026-08-20T09:03:00Z"}
+    ]
+  },
+  {
+    "uuid": "bbbb2222-0000-0000-0000-000000000002",
+    "name": "Fix the billing rounding bug",
+    "created_at": "2026-08-21T09:00:00Z",
+    "updated_at": "2026-08-21T10:00:00Z",
+    "chat_messages": [
+      {"sender": "human", "text": "Invoices are off by one cent on VAT lines", "created_at": "2026-08-21T09:00:00Z"},
+      {"sender": "assistant", "text": "The billing rounding happened per line - moved it to the invoice total.", "created_at": "2026-08-21T09:01:00Z"},
+      {"sender": "human", "text": "Add a regression test for the one-cent case", "created_at": "2026-08-21T09:02:00Z"},
+      {"sender": "assistant", "text": "Added - the one-cent VAT case is pinned by a test now.", "created_at": "2026-08-21T09:03:00Z"}
+    ]
+  }
+]

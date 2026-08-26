@@ -105,10 +105,7 @@ def _claude_web_messages(convo: dict) -> list[tuple[str, str, str | None]]:
     return out
 
 
-def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
-    """Parse a claude.ai or ChatGPT data export (conversations.json) into
-    the same shape as parse_session. Picks the newest conversation, or the
-    newest whose title matches `name_filter` (case-insensitive)."""
+def _filtered_convos(path: Path, name_filter: str | None) -> list[dict]:
     convos = _load_web_conversations(path)
     if name_filter:
         q = name_filter.lower()
@@ -117,8 +114,11 @@ def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
         raise SystemExit(
             f"No conversation{f' matching {name_filter!r}' if name_filter else ''} "
             f"in {path}. Run with --list to see the conversations it holds.")
-    convo = max(convos, key=_convo_updated)
+    return convos
 
+
+def _parse_web_convo(convo: dict) -> dict:
+    """One export conversation → the same parsed shape as parse_session."""
     state = _new_parse_state()
     meta = state["meta"]
     meta["session_id"] = convo.get("uuid") or convo.get("id")
@@ -136,6 +136,23 @@ def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
         state.pop(key)
     state.pop("sidechains", None)
     return state
+
+
+def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
+    """Parse a claude.ai or ChatGPT data export (conversations.json) into
+    the same shape as parse_session. Picks the newest conversation, or the
+    newest whose title matches `name_filter` (case-insensitive)."""
+    return _parse_web_convo(max(_filtered_convos(path, name_filter),
+                                key=_convo_updated))
+
+
+def parse_web_export_all(path: Path,
+                         name_filter: str | None = None) -> list:
+    """EVERY conversation of the export, parsed, oldest first — the
+    input of `--brief` over a web history."""
+    return [_parse_web_convo(c)
+            for c in sorted(_filtered_convos(path, name_filter),
+                            key=_convo_updated)]
 
 
 def list_export_conversations(path: Path) -> None:

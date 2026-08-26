@@ -1739,6 +1739,87 @@ class BriefOutputTests(unittest.TestCase):
         self.assertIn("--format json", str(cm.exception))
 
 
+class BriefGrepTests(unittest.TestCase):
+    """--brief --grep: thematic memory — an export that never touches
+    the project's standing brief."""
+
+    def _run(self, argv):
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with unittest.mock.patch.object(
+                ch.brief, "find_sessions",
+                lambda *a, **k: [FIXTURE, AGENT_SESSION]), \
+                unittest.mock.patch.object(
+                    ch.cli, "cwd_project_filter",
+                    lambda *a, **k: "-home-vspapg-myapp"), \
+                contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            ch.main(argv)
+        return out.getvalue()
+
+    def test_thematic_brief_requires_explicit_output(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._run(["--brief", "--grep", "login"])
+        self.assertIn("-o", str(cm.exception))
+
+    def test_thematic_brief_filters_and_spares_the_store(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+                unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                           Path(td)):
+            out = self._run(["--brief", "--grep", "login", "-o", "-"])
+            self.assertEqual(list(Path(td).iterdir()), [])  # store spared
+        self.assertIn("Fix login bug", out)
+        self.assertNotIn("Parallel refactor", out)     # theme filtered
+        self.assertIn("1 sessions", out)
+
+    def test_thematic_brief_without_matches_errors(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._run(["--brief", "--grep", "zzznothing", "-o", "-"])
+        self.assertIn("matches", str(cm.exception))
+
+
+EXPORT_MULTI = ROOT / "tests" / "fixtures" / "claude_export_multi.json"
+
+
+class WebExportBriefTests(unittest.TestCase):
+    """--brief over a conversations.json: standing memory from a
+    claude.ai/ChatGPT history — explicit -o only, no project store."""
+
+    def _run(self, argv):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            ch.main(argv)
+        return out.getvalue()
+
+    def test_export_brief_requires_explicit_output(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._run([str(EXPORT_MULTI), "--brief"])
+        self.assertIn("-o", str(cm.exception))
+
+    def test_export_brief_covers_every_conversation(self):
+        out = self._run([str(EXPORT_MULTI), "--brief", "-o", "-"])
+        self.assertIn("# Project brief:", out)
+        self.assertIn("Design the onboarding flow", out)
+        self.assertIn("Fix the billing rounding bug", out)
+        self.assertIn("2 sessions", out)
+        self.assertIn("aaaa1111", out)                 # citable ids
+
+    def test_export_brief_composes_with_grep_and_keep(self):
+        out = self._run([str(EXPORT_MULTI), "--brief",
+                         "--grep", "billing", "-o", "-"])
+        self.assertIn("billing rounding", out)
+        self.assertNotIn("onboarding flow", out)
+        out = self._run([str(EXPORT_MULTI), "--brief",
+                         "--keep", "last:1", "-o", "-"])
+        self.assertIn("billing rounding", out)         # newest kept
+        self.assertNotIn("Design the onboarding", out)
+
+
 class BriefExcludeTests(unittest.TestCase):
     """--exclude: leave sessions out of the living brief — everywhere,
     sticky across refreshes via the stamp, interactive when bare."""
@@ -1856,6 +1937,19 @@ class BriefExcludeTests(unittest.TestCase):
                          7)                              # overlap dedupes
         with self.assertRaises(SystemExit):
             ch.brief.apply_keep(parsed, "newest:3")
+
+    def test_keep_since_time_window(self):
+        # since:<ISO or 7d> keeps sessions whose LAST activity is inside
+        # the window — re-applied at each refresh, so it slides too
+        parsed = [_synth_parsed(i) for i in range(7)]     # Jul 1..7
+        kept = ch.brief.apply_keep(parsed, "since:2026-07-05")
+        self.assertEqual([p["meta"]["session_id"] for p in kept],
+                         ["synth004", "synth005", "synth006"])
+        combo = ch.brief.apply_keep(parsed, "first:1,since:2026-07-06")
+        self.assertEqual([p["meta"]["session_id"] for p in combo],
+                         ["synth000", "synth005", "synth006"])
+        with self.assertRaises(SystemExit):
+            ch.brief.apply_keep(parsed, "since:notadate")
 
     def test_keep_is_a_sticky_sliding_window(self):
         import tempfile

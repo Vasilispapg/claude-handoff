@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ._version import __version__
 from .brief import (
+    _grep_parsed,
     _session_title,
     apply_excludes,
     apply_keep,
@@ -59,7 +60,12 @@ from .render import (
     render_transcript,
 )
 from .textutil import fmt_ts, one_line, tilde
-from .webexport import is_web_export, list_export_conversations, parse_web_export
+from .webexport import (
+    is_web_export,
+    list_export_conversations,
+    parse_web_export,
+    parse_web_export_all,
+)
 
 
 def print_completions(shell: str) -> None:
@@ -124,9 +130,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--keep", metavar="SPEC",
                     help="with --brief: window the sessions that feed "
                          "the brief — N or last:N (the N most recent), "
-                         "first:N (the founding ones), or a combination "
-                         "like first:2,last:20; sticky across refreshes "
-                         "(a sliding window), --keep all clears")
+                         "first:N (the founding ones), since:7d (or an "
+                         "ISO date; by last activity), or a combination "
+                         "like first:2,since:30d; sticky across "
+                         "refreshes (a sliding window), --keep all "
+                         "clears")
     ap.add_argument("--exclude", metavar="ID", action="append",
                     nargs="?", const="",
                     help="with --brief: leave session(s) out of the "
@@ -459,12 +467,75 @@ def _resolve_excludes(args: argparse.Namespace, old_stamp: dict | None,
     return list(dict.fromkeys(explicit))
 
 
+def _run_export_brief(args: argparse.Namespace, export: Path) -> None:
+    """--brief over a claude.ai/ChatGPT export: standing memory from a
+    web history. Writes no project store, so -o is mandatory; --grep /
+    --keep / --exclude compose in-memory (nothing sticky — there is no
+    stamp store to stick to)."""
+    if args.output == "handoff.md":
+        raise SystemExit("--brief over a web export writes no project "
+                         "store — pass -o (a file, '-', or clipboard).")
+    parsed_list = [p for p in parse_web_export_all(export, args.name)
+                   if p["turns"] and not looks_trivial(p)]
+    if args.grep:
+        parsed_list = _grep_parsed(parsed_list, args.grep)
+    if args.keep is not None and args.keep != "all":
+        parsed_list = apply_keep(parsed_list, args.keep)
+    if args.exclude:
+        parsed_list, _ = apply_excludes(
+            parsed_list, _resolve_excludes(args, None, parsed_list))
+    if not parsed_list:
+        raise SystemExit(f"No usable conversation in {tilde(export)} "
+                         f"after the filters — run `chf {export} --list`.")
+    label = str(export)
+    if args.llm:
+        doc = build_brief_llm(parsed_list, label, args.llm, args.model,
+                              focus=args.focus, redact=not args.no_redact,
+                              use_cache=not args.no_cache)
+    else:
+        doc = build_brief_deterministic(parsed_list, label)
+    if not args.no_redact:
+        doc = redact_doc(doc)
+    if getattr(args, "anonymize", False):
+        doc, _ = anonymize_text(doc)
+    stamp = make_stamp(len(parsed_list), int(export.stat().st_mtime),
+                       distilled=int(time.time()) if args.llm else 0,
+                       distilled_sessions=(len(parsed_list) if args.llm
+                                           else 0),
+                       provider=args.llm or "none")
+    doc = stamp + "\n" + doc
+    if args.output in ("clipboard", "clip"):
+        tool = _copy_clipboard(doc)
+        print(f"Copied brief to clipboard via {tool} ({len(doc):,} chars, "
+              f"≈{_fmt_tokens(len(doc) // 4)} tokens, {len(parsed_list)} "
+              f"conversations) — paste away.", file=sys.stderr)
+        return
+    if str(args.output) == "-":
+        sys.stdout.write(doc)
+        return
+    dest = Path(args.output)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(doc, encoding="utf-8")
+    print(f"Wrote brief {tilde(dest)} ({len(parsed_list)} conversations, "
+          f"≈{_fmt_tokens(len(doc) // 4)} tokens)", file=sys.stderr)
+
+
 def _run_brief(args: argparse.Namespace) -> None:
     """--brief: whole-project memory document (see brief.py)."""
     if args.format == "json":
         raise SystemExit("--brief --format json isn't supported (yet) — "
                          "the brief is a markdown document; --format "
                          "applies to handoffs and --list.")
+    if args.session:
+        export = (Path(args.session[0]).expanduser()
+                  if len(args.session) == 1 else None)
+        if export is None or not (export.is_file()
+                                  and is_web_export(export)):
+            raise SystemExit("--brief works on the project store or on "
+                             "ONE web export (conversations.json) — it "
+                             "doesn't take session paths or names.")
+        _run_export_brief(args, export)
+        return
     scope = args.project
     if isinstance(scope, list):
         if len(scope) > 1:
@@ -480,12 +551,25 @@ def _run_brief(args: argparse.Namespace) -> None:
     if not parsed_list:
         raise SystemExit(f"No sessions to brief for {scope!r} — "
                          f"run --list.")
+    if args.grep:
+        # thematic memory is an EXPORT — it must never overwrite (or
+        # graft from) the project's standing brief
+        if args.output == "handoff.md":
+            raise SystemExit("--brief --grep is a thematic export — "
+                             "pass -o (a file, '-', or clipboard) so it "
+                             "never overwrites the project's standing "
+                             "memory.")
+        parsed_list = _grep_parsed(parsed_list, args.grep)
+        if not parsed_list:
+            raise SystemExit(f"No session's conversation matches "
+                             f"{' AND '.join(args.grep)!r} in {scope!r}.")
     # clipboard is a way to SHIP the current brief (e.g. paste the
     # project memory into another model), so it grafts like the default
     # destination; any other -o stays a plain exported skeleton
     to_clipboard = args.output in ("clipboard", "clip")
     prior = (brief_path(scope)
-             if args.output == "handoff.md" or to_clipboard else None)
+             if (args.output == "handoff.md" or to_clipboard)
+             and not args.grep else None)
     old = (prior.read_text(encoding="utf-8")
            if prior is not None and prior.is_file() else None)
     old_stamp = parse_stamp(old) if old else None

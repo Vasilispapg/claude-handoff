@@ -164,6 +164,13 @@ them until you change them (`--exclude none`, `--keep all`). And
 included — straight to the clipboard, one paste away from handing your
 project memory to another model.
 
+The brief also goes beyond the project store: `chf --brief --grep X
+-o -` distills a **thematic memory** (only the sessions that talked
+about X), and `chf conversations.json --brief -o brief.md` builds
+standing memory **from a claude.ai or ChatGPT export** — every
+conversation, cited by its id. Both are exports by design (explicit
+`-o` only) so they never overwrite the standing brief.
+
 ```bash
 chf --install-brief-hook
 ```
@@ -275,6 +282,9 @@ chf --brief                        # free factual brief (timeline + files)
 chf --brief --llm claude-cli       # + distilled decisions/fixes/conventions
 chf --brief --exclude              # numbered picker: leave sessions out (sticky)
 chf --brief --keep first:2,last:20 # bound a huge history: founding + recent
+chf --brief --keep since:30d       # …or by time — the window slides
+chf --brief --grep auth -o -       # thematic memory: only the auth sessions
+chf conversations.json --brief -o brief.md   # memory from a claude.ai/ChatGPT export
 ```
 
 **Where does it look?** Sessions live in Claude Code's global store
@@ -430,7 +440,7 @@ Set `PYTHONUTF8=1` (the CI runs the whole suite that way).
 | `--merge` | merge every session in scope into ONE handoff (session-break markers, summed activity) |
 | `--brief` | distill the project's whole history into `~/.claude/briefs/<project>.md` (deterministic; `--llm` for real distillation) |
 | `--exclude ID` | with `--brief`: leave session(s) out of the memory — an id prefix (from `--list` or the brief's citations), comma-separate or repeat for several; **bare `--exclude` opens a numbered picker**; sticky across refreshes, `--exclude none` clears |
-| `--keep SPEC` | with `--brief`: window the sessions that feed the memory — `20` / `last:20` (most recent), `first:2` (founding), or `first:2,last:20`; sticky, so refreshes keep a **sliding window**; `--keep all` clears |
+| `--keep SPEC` | with `--brief`: window the sessions that feed the memory — `20` / `last:20` (most recent), `first:2` (founding), `since:7d` (by last activity; ISO dates work too), or combinations like `first:2,since:30d`; sticky, so refreshes keep a **sliding window**; `--keep all` clears |
 | `--install-brief-hook` / `--uninstall-brief-hook` | project memory hooks: inject the brief at SessionStart, auto-refresh facts at SessionEnd |
 | `--install-hook` / `--uninstall-hook` | auto-write a handoff to `~/.claude/handoffs/` when each session ends |
 | `--format md\|json` | markdown (default) or machine-readable JSON — also applies to `--list` |
@@ -456,9 +466,6 @@ Set `PYTHONUTF8=1` (the CI runs the whole suite that way).
 
 - Gemini exports as input (Google Takeout ships HTML only — bring a real, redacted export to build against)
 - Session chains: auto-detect `/compact`-continued sessions and offer to merge the lineage (`--follow`)
-- `--brief` over web exports (`conversations.json`) — standing memory from a claude.ai/ChatGPT history
-- Thematic memory: `--brief --grep X` distills only the sessions that talked about X
-- `--keep since:7d` — time windows alongside the count windows
 
 PRs welcome.
 

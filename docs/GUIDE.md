@@ -187,8 +187,12 @@ focuses.
 
 **Curating the input:** `--exclude <id>` leaves sessions out entirely
 (bare `--exclude` opens a numbered picker) and `--keep first:2,last:20`
-windows a huge history. Both are stored in the stamp, so hooks and
-every later rebuild re-apply them — `--keep` becomes a sliding window.
+— or `--keep since:30d`, by last activity — windows a huge history.
+Both are stored in the stamp, so hooks and every later rebuild re-apply
+them: count and time windows slide. Two more inputs are exports by
+design (explicit `-o`, never the store): `--brief --grep X` distills a
+thematic memory, and `chf conversations.json --brief -o brief.md`
+builds one from a claude.ai/ChatGPT data export.
 
 **Then:** redaction → freshness stamp (session count, newest mtime,
 distillation age, exclude/keep selection) → written to
@@ -237,6 +241,9 @@ chf --brief                          # free factual memory
 chf --brief --llm claude-cli         # distilled memory (cached, cited)
 chf --brief --exclude                # picker: leave sessions out (sticky)
 chf --brief --keep first:2,last:20   # window a huge history (sliding)
+chf --brief --keep since:30d         # …or by time
+chf --brief --grep auth -o -         # thematic memory (export-only)
+chf conversations.json --brief -o brief.md   # memory from a web export
 chf --install-brief-hook             # inject memory into every session
 chf --install-hook                   # auto-handoff on session end
 chf --debug ...                      # show every tolerated failure

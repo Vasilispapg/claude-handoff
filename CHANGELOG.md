@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Standing memory from a web history**: `chf conversations.json
+  --brief -o brief.md` distills EVERY conversation of a claude.ai or
+  ChatGPT data export into one cited brief (`--llm` included — notes
+  cached per conversation). Explicit `-o` only: an export brief never
+  touches the project store. `--grep` / `--keep` / `--exclude` compose
+  in-memory.
+- **Thematic memory — `--brief --grep X`**: distill only the sessions
+  whose conversation mentions X (AND across repeated flags, said text
+  only). An export by design: it requires `-o` and never overwrites or
+  grafts from the project's standing brief.
+- **Time windows — `--keep since:7d`**: alongside the count windows,
+  keep sessions by last activity (`7d`/`2h` relative to now, or an ISO
+  date), combinable as `first:2,since:30d` — sticky like the rest, so
+  the time window slides on every refresh.
+
 - **`--brief -o clipboard`**: ships the *current* brief — grafted
   distillation included, like the default destination — straight to the
   clipboard: one paste hands your project memory to any other model.

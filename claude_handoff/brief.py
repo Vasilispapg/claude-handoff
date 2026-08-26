@@ -24,7 +24,7 @@ from .llm import (
     _progress_step,
     _resolve_provider,
 )
-from .parse import looks_trivial, parse_session
+from .parse import _parse_ts, _since_cutoff, looks_trivial, parse_session
 from .redact import redact_secrets
 from .render import render_activity, render_transcript
 from .textutil import fmt_ts, one_line, truncate
@@ -438,41 +438,71 @@ def parse_stamp(text: str) -> dict | None:
 
 
 def parse_keep(spec: str) -> tuple:
-    """(first, last) counts from a --keep spec — 'first:2,last:20',
-    bare N meaning last:N, 'all' meaning no window. Anything else is a
-    visible usage error, never a silent guess."""
+    """(first, last, since) from a --keep spec — 'first:2,last:20',
+    bare N meaning last:N, 'since:7d' (or an ISO date) for a time
+    window, 'all' meaning no window. Anything else is a visible usage
+    error, never a silent guess."""
     if spec in ("", "all"):
-        return 0, 0
+        return 0, 0, None
     first = last = 0
+    since = None
     for part in spec.split(","):
-        m = re.fullmatch(r"(?:(first|last):)?(\d+)", part.strip())
-        if not m or int(m.group(2)) == 0:
-            raise SystemExit(
-                f"--keep {spec!r}: use N, first:N, last:N or a "
-                f"combination — e.g. --keep 20 or --keep first:2,last:20.")
-        if m.group(1) == "first":
-            first += int(m.group(2))
-        else:
-            last += int(m.group(2))
-    return first, last
+        part = part.strip()
+        m = re.fullmatch(r"(?:(first|last):)?(\d+)", part)
+        if m and int(m.group(2)) > 0:
+            if m.group(1) == "first":
+                first += int(m.group(2))
+            else:
+                last += int(m.group(2))
+            continue
+        if part.startswith("since:") and part[len("since:"):]:
+            since = part[len("since:"):]
+            _since_cutoff(since, None)     # validate loudly, upfront
+            continue
+        raise SystemExit(
+            f"--keep {spec!r}: use N, first:N, last:N, since:7d (or an "
+            f"ISO date), or a combination — e.g. --keep first:2,last:20 "
+            f"or --keep since:30d.")
+    return first, last, since
 
 
 def apply_keep(parsed_list: list, spec: str) -> list:
-    """Chronological session window: the first F (founding) and last L
-    (recent) sessions; the middle stays out of the brief. Sticky via
-    the stamp, so every refresh re-applies it — a sliding window."""
-    first, last = parse_keep(spec)
-    if not first and not last:
+    """Chronological session window: the first F (founding), the last L
+    (recent), and everything active since a cutoff; the rest stays out
+    of the brief. Sticky via the stamp and re-derived on every refresh,
+    so both the count and the time window slide."""
+    first, last, since = parse_keep(spec)
+    if not first and not last and not since:
         return parsed_list
     ordered = sorted(parsed_list,
                      key=lambda p: p["meta"]["first_ts"] or "")
     head = ordered[:first]
     tail = ordered[-last:] if last else []
+    timely = []
+    if since:
+        cutoff = _since_cutoff(since, None)
+        timely = [p for p in ordered
+                  if (_parse_ts(p["meta"]["last_ts"]) or cutoff) >= cutoff]
     seen: set = set()
     kept = []
-    for p in head + tail:
+    for p in head + timely + tail:
         if id(p) not in seen:
             seen.add(id(p))
+            kept.append(p)
+    return kept
+
+
+def _grep_parsed(parsed_list: list, terms: list) -> list:
+    """Sessions whose conversation contains every term (AND,
+    case-insensitive) — same semantics as --grep selection: only what
+    was actually said counts, tool noise doesn't."""
+    needles = [t.lower() for t in terms]
+    kept = []
+    for p in parsed_list:
+        text = "\n".join("\n".join(t["text_parts"])
+                         for t in p["turns"]
+                         if t["role"] in ("user", "assistant")).lower()
+        if all(n in text for n in needles):
             kept.append(p)
     return kept
 

@@ -814,10 +814,7 @@ def _claude_web_messages(convo: dict) -> list[tuple[str, str, str | None]]:
     return out
 
 
-def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
-    """Parse a claude.ai or ChatGPT data export (conversations.json) into
-    the same shape as parse_session. Picks the newest conversation, or the
-    newest whose title matches `name_filter` (case-insensitive)."""
+def _filtered_convos(path: Path, name_filter: str | None) -> list[dict]:
     convos = _load_web_conversations(path)
     if name_filter:
         q = name_filter.lower()
@@ -826,8 +823,11 @@ def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
         raise SystemExit(
             f"No conversation{f' matching {name_filter!r}' if name_filter else ''} "
             f"in {path}. Run with --list to see the conversations it holds.")
-    convo = max(convos, key=_convo_updated)
+    return convos
 
+
+def _parse_web_convo(convo: dict) -> dict:
+    """One export conversation → the same parsed shape as parse_session."""
     state = _new_parse_state()
     meta = state["meta"]
     meta["session_id"] = convo.get("uuid") or convo.get("id")
@@ -845,6 +845,23 @@ def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
         state.pop(key)
     state.pop("sidechains", None)
     return state
+
+
+def parse_web_export(path: Path, name_filter: str | None = None) -> dict:
+    """Parse a claude.ai or ChatGPT data export (conversations.json) into
+    the same shape as parse_session. Picks the newest conversation, or the
+    newest whose title matches `name_filter` (case-insensitive)."""
+    return _parse_web_convo(max(_filtered_convos(path, name_filter),
+                                key=_convo_updated))
+
+
+def parse_web_export_all(path: Path,
+                         name_filter: str | None = None) -> list:
+    """EVERY conversation of the export, parsed, oldest first — the
+    input of `--brief` over a web history."""
+    return [_parse_web_convo(c)
+            for c in sorted(_filtered_convos(path, name_filter),
+                            key=_convo_updated)]
 
 
 def list_export_conversations(path: Path) -> None:
@@ -2324,41 +2341,71 @@ def parse_stamp(text: str) -> dict | None:
 
 
 def parse_keep(spec: str) -> tuple:
-    """(first, last) counts from a --keep spec — 'first:2,last:20',
-    bare N meaning last:N, 'all' meaning no window. Anything else is a
-    visible usage error, never a silent guess."""
+    """(first, last, since) from a --keep spec — 'first:2,last:20',
+    bare N meaning last:N, 'since:7d' (or an ISO date) for a time
+    window, 'all' meaning no window. Anything else is a visible usage
+    error, never a silent guess."""
     if spec in ("", "all"):
-        return 0, 0
+        return 0, 0, None
     first = last = 0
+    since = None
     for part in spec.split(","):
-        m = re.fullmatch(r"(?:(first|last):)?(\d+)", part.strip())
-        if not m or int(m.group(2)) == 0:
-            raise SystemExit(
-                f"--keep {spec!r}: use N, first:N, last:N or a "
-                f"combination — e.g. --keep 20 or --keep first:2,last:20.")
-        if m.group(1) == "first":
-            first += int(m.group(2))
-        else:
-            last += int(m.group(2))
-    return first, last
+        part = part.strip()
+        m = re.fullmatch(r"(?:(first|last):)?(\d+)", part)
+        if m and int(m.group(2)) > 0:
+            if m.group(1) == "first":
+                first += int(m.group(2))
+            else:
+                last += int(m.group(2))
+            continue
+        if part.startswith("since:") and part[len("since:"):]:
+            since = part[len("since:"):]
+            _since_cutoff(since, None)     # validate loudly, upfront
+            continue
+        raise SystemExit(
+            f"--keep {spec!r}: use N, first:N, last:N, since:7d (or an "
+            f"ISO date), or a combination — e.g. --keep first:2,last:20 "
+            f"or --keep since:30d.")
+    return first, last, since
 
 
 def apply_keep(parsed_list: list, spec: str) -> list:
-    """Chronological session window: the first F (founding) and last L
-    (recent) sessions; the middle stays out of the brief. Sticky via
-    the stamp, so every refresh re-applies it — a sliding window."""
-    first, last = parse_keep(spec)
-    if not first and not last:
+    """Chronological session window: the first F (founding), the last L
+    (recent), and everything active since a cutoff; the rest stays out
+    of the brief. Sticky via the stamp and re-derived on every refresh,
+    so both the count and the time window slide."""
+    first, last, since = parse_keep(spec)
+    if not first and not last and not since:
         return parsed_list
     ordered = sorted(parsed_list,
                      key=lambda p: p["meta"]["first_ts"] or "")
     head = ordered[:first]
     tail = ordered[-last:] if last else []
+    timely = []
+    if since:
+        cutoff = _since_cutoff(since, None)
+        timely = [p for p in ordered
+                  if (_parse_ts(p["meta"]["last_ts"]) or cutoff) >= cutoff]
     seen: set = set()
     kept = []
-    for p in head + tail:
+    for p in head + timely + tail:
         if id(p) not in seen:
             seen.add(id(p))
+            kept.append(p)
+    return kept
+
+
+def _grep_parsed(parsed_list: list, terms: list) -> list:
+    """Sessions whose conversation contains every term (AND,
+    case-insensitive) — same semantics as --grep selection: only what
+    was actually said counts, tool noise doesn't."""
+    needles = [t.lower() for t in terms]
+    kept = []
+    for p in parsed_list:
+        text = "\n".join("\n".join(t["text_parts"])
+                         for t in p["turns"]
+                         if t["role"] in ("user", "assistant")).lower()
+        if all(n in text for n in needles):
             kept.append(p)
     return kept
 
@@ -2896,9 +2943,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--keep", metavar="SPEC",
                     help="with --brief: window the sessions that feed "
                          "the brief — N or last:N (the N most recent), "
-                         "first:N (the founding ones), or a combination "
-                         "like first:2,last:20; sticky across refreshes "
-                         "(a sliding window), --keep all clears")
+                         "first:N (the founding ones), since:7d (or an "
+                         "ISO date; by last activity), or a combination "
+                         "like first:2,since:30d; sticky across "
+                         "refreshes (a sliding window), --keep all "
+                         "clears")
     ap.add_argument("--exclude", metavar="ID", action="append",
                     nargs="?", const="",
                     help="with --brief: leave session(s) out of the "
@@ -3231,12 +3280,75 @@ def _resolve_excludes(args: argparse.Namespace, old_stamp: dict | None,
     return list(dict.fromkeys(explicit))
 
 
+def _run_export_brief(args: argparse.Namespace, export: Path) -> None:
+    """--brief over a claude.ai/ChatGPT export: standing memory from a
+    web history. Writes no project store, so -o is mandatory; --grep /
+    --keep / --exclude compose in-memory (nothing sticky — there is no
+    stamp store to stick to)."""
+    if args.output == "handoff.md":
+        raise SystemExit("--brief over a web export writes no project "
+                         "store — pass -o (a file, '-', or clipboard).")
+    parsed_list = [p for p in parse_web_export_all(export, args.name)
+                   if p["turns"] and not looks_trivial(p)]
+    if args.grep:
+        parsed_list = _grep_parsed(parsed_list, args.grep)
+    if args.keep is not None and args.keep != "all":
+        parsed_list = apply_keep(parsed_list, args.keep)
+    if args.exclude:
+        parsed_list, _ = apply_excludes(
+            parsed_list, _resolve_excludes(args, None, parsed_list))
+    if not parsed_list:
+        raise SystemExit(f"No usable conversation in {tilde(export)} "
+                         f"after the filters — run `chf {export} --list`.")
+    label = str(export)
+    if args.llm:
+        doc = build_brief_llm(parsed_list, label, args.llm, args.model,
+                              focus=args.focus, redact=not args.no_redact,
+                              use_cache=not args.no_cache)
+    else:
+        doc = build_brief_deterministic(parsed_list, label)
+    if not args.no_redact:
+        doc = redact_doc(doc)
+    if getattr(args, "anonymize", False):
+        doc, _ = anonymize_text(doc)
+    stamp = make_stamp(len(parsed_list), int(export.stat().st_mtime),
+                       distilled=int(time.time()) if args.llm else 0,
+                       distilled_sessions=(len(parsed_list) if args.llm
+                                           else 0),
+                       provider=args.llm or "none")
+    doc = stamp + "\n" + doc
+    if args.output in ("clipboard", "clip"):
+        tool = _copy_clipboard(doc)
+        print(f"Copied brief to clipboard via {tool} ({len(doc):,} chars, "
+              f"≈{_fmt_tokens(len(doc) // 4)} tokens, {len(parsed_list)} "
+              f"conversations) — paste away.", file=sys.stderr)
+        return
+    if str(args.output) == "-":
+        sys.stdout.write(doc)
+        return
+    dest = Path(args.output)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(doc, encoding="utf-8")
+    print(f"Wrote brief {tilde(dest)} ({len(parsed_list)} conversations, "
+          f"≈{_fmt_tokens(len(doc) // 4)} tokens)", file=sys.stderr)
+
+
 def _run_brief(args: argparse.Namespace) -> None:
     """--brief: whole-project memory document (see brief.py)."""
     if args.format == "json":
         raise SystemExit("--brief --format json isn't supported (yet) — "
                          "the brief is a markdown document; --format "
                          "applies to handoffs and --list.")
+    if args.session:
+        export = (Path(args.session[0]).expanduser()
+                  if len(args.session) == 1 else None)
+        if export is None or not (export.is_file()
+                                  and is_web_export(export)):
+            raise SystemExit("--brief works on the project store or on "
+                             "ONE web export (conversations.json) — it "
+                             "doesn't take session paths or names.")
+        _run_export_brief(args, export)
+        return
     scope = args.project
     if isinstance(scope, list):
         if len(scope) > 1:
@@ -3252,12 +3364,25 @@ def _run_brief(args: argparse.Namespace) -> None:
     if not parsed_list:
         raise SystemExit(f"No sessions to brief for {scope!r} — "
                          f"run --list.")
+    if args.grep:
+        # thematic memory is an EXPORT — it must never overwrite (or
+        # graft from) the project's standing brief
+        if args.output == "handoff.md":
+            raise SystemExit("--brief --grep is a thematic export — "
+                             "pass -o (a file, '-', or clipboard) so it "
+                             "never overwrites the project's standing "
+                             "memory.")
+        parsed_list = _grep_parsed(parsed_list, args.grep)
+        if not parsed_list:
+            raise SystemExit(f"No session's conversation matches "
+                             f"{' AND '.join(args.grep)!r} in {scope!r}.")
     # clipboard is a way to SHIP the current brief (e.g. paste the
     # project memory into another model), so it grafts like the default
     # destination; any other -o stays a plain exported skeleton
     to_clipboard = args.output in ("clipboard", "clip")
     prior = (brief_path(scope)
-             if args.output == "handoff.md" or to_clipboard else None)
+             if (args.output == "handoff.md" or to_clipboard)
+             and not args.grep else None)
     old = (prior.read_text(encoding="utf-8")
            if prior is not None and prior.is_file() else None)
     old_stamp = parse_stamp(old) if old else None

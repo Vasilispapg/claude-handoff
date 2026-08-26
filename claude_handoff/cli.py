@@ -15,8 +15,10 @@ from .brief import (
     brief_path,
     build_brief_deterministic,
     build_brief_llm,
+    graft_distilled,
     load_project_sessions,
     make_stamp,
+    parse_stamp,
 )
 from .discovery import (
     PROJECTS_DIR,
@@ -400,6 +402,7 @@ def _run_brief(args: argparse.Namespace) -> None:
         raise SystemExit(f"No sessions to brief for {scope!r} — "
                          f"run --list.")
     label = brief_label(parsed_list, scope)
+    old_stamp = None
     if args.llm:
         doc = build_brief_llm(parsed_list, label, args.llm,
                               args.model, focus=args.focus,
@@ -407,6 +410,16 @@ def _run_brief(args: argparse.Namespace) -> None:
                               use_cache=not args.no_cache)
     else:
         doc = build_brief_deterministic(parsed_list, label)
+        # rebuilding the free skeleton must not discard a paid
+        # distillation living in the stamped brief file (-o elsewhere
+        # stays a plain skeleton)
+        prior = brief_path(scope) if args.output == "handoff.md" else None
+        if prior is not None and prior.is_file():
+            old = prior.read_text(encoding="utf-8")
+            old_stamp = parse_stamp(old)
+            if old_stamp:
+                doc = graft_distilled(old, doc, old_stamp, label,
+                                      len(parsed_list))
     if not args.no_redact:
         doc = redact_doc(doc)
     if getattr(args, "anonymize", False):
@@ -416,6 +429,11 @@ def _run_brief(args: argparse.Namespace) -> None:
                            distilled=int(time.time()),
                            distilled_sessions=len(parsed_list),
                            provider=args.llm)
+    elif old_stamp:
+        stamp = make_stamp(len(parsed_list), newest_mtime,
+                           old_stamp["distilled"],
+                           old_stamp["distilled_sessions"],
+                           old_stamp["provider"])
     else:
         stamp = make_stamp(len(parsed_list), newest_mtime, 0, 0,
                            "none")

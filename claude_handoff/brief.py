@@ -361,6 +361,37 @@ def split_distilled(text: str) -> str | None:
     return text[idx:] if idx >= 0 else None
 
 
+def graft_distilled(old: str, doc: str, stamp: dict, label: str,
+                    session_count: int) -> str:
+    """Carry the distilled section of an existing brief onto a freshly
+    built skeleton, with freshness notes re-derived (never stacked) —
+    shared by the SessionEnd refresh and the plain `--brief` rebuild, so
+    a paid distillation is never silently discarded."""
+    distilled = split_distilled(old)
+    if distilled is None:
+        return doc
+    distilled = _FRESHNESS_NOTE_RE.sub("\n", distilled)
+    distilled = _GIT_NOTE_RE.sub("\n", distilled)
+    notes = ""
+    newer = session_count - stamp["distilled_sessions"]
+    if stamp["distilled"] and newer > 0:
+        notes += (f"\n_{newer} newer session(s) since this "
+                  f"distillation — refresh with `chf --brief --llm "
+                  f"{stamp['provider']}`._\n")
+    commits = (_git_commits_since(label, stamp["distilled"])
+               if stamp["distilled"] else 0)
+    if commits:
+        _, sha, subject = _git_head(label)
+        notes += (f"\n_{commits} commit(s) landed after this "
+                  f"distillation (HEAD `{sha[:8]}` — "
+                  f"{one_line(subject, 60)}) — the distilled memory "
+                  f"may lag the repo._\n")
+    if notes:
+        distilled = distilled.replace(DISTILLED_MARK,
+                                      DISTILLED_MARK + notes, 1)
+    return doc + distilled
+
+
 def update_brief_skeleton(project: str) -> bool:
     """SessionEnd refresh: rebuild the factual skeleton of an EXISTING
     stamped brief, preserving the distilled section with a freshness note.
@@ -378,29 +409,8 @@ def update_brief_skeleton(project: str) -> bool:
     if not parsed_list:
         return False
     label = brief_label(parsed_list, project)
-    doc = build_brief_deterministic(parsed_list, label)
-    distilled = split_distilled(old)
-    if distilled is not None:
-        distilled = _FRESHNESS_NOTE_RE.sub("\n", distilled)
-        distilled = _GIT_NOTE_RE.sub("\n", distilled)
-        notes = ""
-        newer = len(parsed_list) - stamp["distilled_sessions"]
-        if stamp["distilled"] and newer > 0:
-            notes += (f"\n_{newer} newer session(s) since this "
-                      f"distillation — refresh with `chf --brief --llm "
-                      f"{stamp['provider']}`._\n")
-        commits = (_git_commits_since(label, stamp["distilled"])
-                   if stamp["distilled"] else 0)
-        if commits:
-            _, sha, subject = _git_head(label)
-            notes += (f"\n_{commits} commit(s) landed after this "
-                      f"distillation (HEAD `{sha[:8]}` — "
-                      f"{one_line(subject, 60)}) — the distilled memory "
-                      f"may lag the repo._\n")
-        if notes:
-            distilled = distilled.replace(DISTILLED_MARK,
-                                          DISTILLED_MARK + notes, 1)
-        doc = doc + distilled
+    doc = graft_distilled(old, build_brief_deterministic(parsed_list, label),
+                          stamp, label, len(parsed_list))
     new_stamp = make_stamp(len(parsed_list), newest, stamp["distilled"],
                            stamp["distilled_sessions"], stamp["provider"])
     path.write_text(new_stamp + "\n" + doc, encoding="utf-8")

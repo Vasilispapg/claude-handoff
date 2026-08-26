@@ -117,7 +117,10 @@ Import direction flows strictly downward (no cycles): `textutil` →
   subprocess), `build_brief_llm`
   (per-session notes, cached by prompt+content hash, then one reduce —
   `SESSION_NOTE_PROMPT` / `BRIEF_PROMPT`), `brief_path` (~/.claude/briefs),
-  freshness stamps (`make_stamp`/`parse_stamp`), `update_brief_skeleton`
+  freshness stamps (`make_stamp`/`parse_stamp`), `graft_distilled`
+  (carry an existing distilled section + freshness notes onto a fresh
+  skeleton — used by BOTH the SessionEnd refresh and the plain `--brief`
+  rebuild so a paid distillation is never discarded), `update_brief_skeleton`
   (SessionEnd refresh — existing stamped briefs only). Hook side lives in
   integrations.py: `install_brief_hook` (installs BOTH SessionStart inject
   + SessionEnd update), `run_brief_hook_mode` (plain stdout becomes

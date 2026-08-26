@@ -2108,6 +2108,37 @@ def split_distilled(text: str) -> str | None:
     return text[idx:] if idx >= 0 else None
 
 
+def graft_distilled(old: str, doc: str, stamp: dict, label: str,
+                    session_count: int) -> str:
+    """Carry the distilled section of an existing brief onto a freshly
+    built skeleton, with freshness notes re-derived (never stacked) —
+    shared by the SessionEnd refresh and the plain `--brief` rebuild, so
+    a paid distillation is never silently discarded."""
+    distilled = split_distilled(old)
+    if distilled is None:
+        return doc
+    distilled = _FRESHNESS_NOTE_RE.sub("\n", distilled)
+    distilled = _GIT_NOTE_RE.sub("\n", distilled)
+    notes = ""
+    newer = session_count - stamp["distilled_sessions"]
+    if stamp["distilled"] and newer > 0:
+        notes += (f"\n_{newer} newer session(s) since this "
+                  f"distillation — refresh with `chf --brief --llm "
+                  f"{stamp['provider']}`._\n")
+    commits = (_git_commits_since(label, stamp["distilled"])
+               if stamp["distilled"] else 0)
+    if commits:
+        _, sha, subject = _git_head(label)
+        notes += (f"\n_{commits} commit(s) landed after this "
+                  f"distillation (HEAD `{sha[:8]}` — "
+                  f"{one_line(subject, 60)}) — the distilled memory "
+                  f"may lag the repo._\n")
+    if notes:
+        distilled = distilled.replace(DISTILLED_MARK,
+                                      DISTILLED_MARK + notes, 1)
+    return doc + distilled
+
+
 def update_brief_skeleton(project: str) -> bool:
     """SessionEnd refresh: rebuild the factual skeleton of an EXISTING
     stamped brief, preserving the distilled section with a freshness note.
@@ -2125,29 +2156,8 @@ def update_brief_skeleton(project: str) -> bool:
     if not parsed_list:
         return False
     label = brief_label(parsed_list, project)
-    doc = build_brief_deterministic(parsed_list, label)
-    distilled = split_distilled(old)
-    if distilled is not None:
-        distilled = _FRESHNESS_NOTE_RE.sub("\n", distilled)
-        distilled = _GIT_NOTE_RE.sub("\n", distilled)
-        notes = ""
-        newer = len(parsed_list) - stamp["distilled_sessions"]
-        if stamp["distilled"] and newer > 0:
-            notes += (f"\n_{newer} newer session(s) since this "
-                      f"distillation — refresh with `chf --brief --llm "
-                      f"{stamp['provider']}`._\n")
-        commits = (_git_commits_since(label, stamp["distilled"])
-                   if stamp["distilled"] else 0)
-        if commits:
-            _, sha, subject = _git_head(label)
-            notes += (f"\n_{commits} commit(s) landed after this "
-                      f"distillation (HEAD `{sha[:8]}` — "
-                      f"{one_line(subject, 60)}) — the distilled memory "
-                      f"may lag the repo._\n")
-        if notes:
-            distilled = distilled.replace(DISTILLED_MARK,
-                                          DISTILLED_MARK + notes, 1)
-        doc = doc + distilled
+    doc = graft_distilled(old, build_brief_deterministic(parsed_list, label),
+                          stamp, label, len(parsed_list))
     new_stamp = make_stamp(len(parsed_list), newest, stamp["distilled"],
                            stamp["distilled_sessions"], stamp["provider"])
     path.write_text(new_stamp + "\n" + doc, encoding="utf-8")
@@ -2854,6 +2864,7 @@ def _run_brief(args: argparse.Namespace) -> None:
         raise SystemExit(f"No sessions to brief for {scope!r} — "
                          f"run --list.")
     label = brief_label(parsed_list, scope)
+    old_stamp = None
     if args.llm:
         doc = build_brief_llm(parsed_list, label, args.llm,
                               args.model, focus=args.focus,
@@ -2861,6 +2872,16 @@ def _run_brief(args: argparse.Namespace) -> None:
                               use_cache=not args.no_cache)
     else:
         doc = build_brief_deterministic(parsed_list, label)
+        # rebuilding the free skeleton must not discard a paid
+        # distillation living in the stamped brief file (-o elsewhere
+        # stays a plain skeleton)
+        prior = brief_path(scope) if args.output == "handoff.md" else None
+        if prior is not None and prior.is_file():
+            old = prior.read_text(encoding="utf-8")
+            old_stamp = parse_stamp(old)
+            if old_stamp:
+                doc = graft_distilled(old, doc, old_stamp, label,
+                                      len(parsed_list))
     if not args.no_redact:
         doc = redact_doc(doc)
     if getattr(args, "anonymize", False):
@@ -2870,6 +2891,11 @@ def _run_brief(args: argparse.Namespace) -> None:
                            distilled=int(time.time()),
                            distilled_sessions=len(parsed_list),
                            provider=args.llm)
+    elif old_stamp:
+        stamp = make_stamp(len(parsed_list), newest_mtime,
+                           old_stamp["distilled"],
+                           old_stamp["distilled_sessions"],
+                           old_stamp["provider"])
     else:
         stamp = make_stamp(len(parsed_list), newest_mtime, 0, 0,
                            "none")

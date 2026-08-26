@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Plain `--brief` no longer discards a paid distillation**: rebuilding
+  the free skeleton onto the stamped brief file now grafts the existing
+  distilled section (with freshness notes re-derived) and carries the
+  distillation stamp forward — same behavior the SessionEnd refresh
+  always had. An explicit `-o` elsewhere still writes a plain skeleton.
 - **Git-aware freshness**: the brief now knows the repo, not just the
   session store. The skeleton carries a `Repo HEAD` line (short hash +
   date + subject of the last commit); the SessionEnd refresh and the

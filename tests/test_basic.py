@@ -1313,6 +1313,63 @@ class BriefTests(unittest.TestCase):
         self.assertNotIn("\n## Decisions", distilled)
         self.assertIn("## Session timeline", doc)   # skeleton stays H2
 
+    def test_plain_brief_preserves_existing_distillation(self):
+        import contextlib
+        import io
+        import tempfile
+        old = ("<!-- claude-handoff-brief v=1 built=10 sessions=1 "
+               "newest_mtime=10 distilled=1500 distilled_sessions=1 "
+               "provider=claude-cli -->\n"
+               "# Project brief: old\n\n## Session timeline\n\n- old\n\n"
+               "## Distilled memory\n\n- Redis for drafts [abc123]\n")
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                old, encoding="utf-8")
+            with unittest.mock.patch.object(
+                    ch.brief, "find_sessions",
+                    lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(
+                        ch.cli, "cwd_project_filter",
+                        lambda *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                               Path(td)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.main(["--brief"])
+            text = (Path(td) / "-home-vspapg-myapp.md") \
+                .read_text(encoding="utf-8")
+        self.assertIn("Fix login bug in auth.py", text)     # fresh skeleton
+        self.assertIn("- Redis for drafts [abc123]", text)  # distilled kept
+        stamp = ch.brief.parse_stamp(text)
+        self.assertEqual(stamp["distilled"], 1500)          # stamp carried
+        self.assertEqual(stamp["provider"], "claude-cli")
+
+    def test_plain_brief_to_explicit_output_stays_deterministic(self):
+        import contextlib
+        import io
+        import tempfile
+        old = ("<!-- claude-handoff-brief v=1 built=10 sessions=1 "
+               "newest_mtime=10 distilled=1500 distilled_sessions=1 "
+               "provider=claude-cli -->\n"
+               "# Project brief: old\n\n"
+               "## Distilled memory\n\n- Redis for drafts [abc123]\n")
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                old, encoding="utf-8")
+            out = Path(td) / "elsewhere.md"
+            with unittest.mock.patch.object(
+                    ch.brief, "find_sessions",
+                    lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(
+                        ch.cli, "cwd_project_filter",
+                        lambda *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                               Path(td)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.main(["--brief", "-o", str(out)])
+            text = out.read_text(encoding="utf-8")
+        self.assertIn("Fix login bug in auth.py", text)
+        self.assertNotIn("Redis for drafts", text)   # -o: plain skeleton
+
     def test_monster_session_note_is_map_reduced(self):
         import contextlib
         import io

@@ -1,6 +1,6 @@
 # claude-handoff
 
-![claude-handoff: turn a messy Claude Code session into one clean handoff.md](docs/assets/banner.svg)
+![claude-handoff: the noisy transcript flows through chf and becomes a clean handoff.md and standing project memory](docs/assets/hero.svg)
 
 [![PyPI](https://img.shields.io/pypi/v/claude-handoff)](https://pypi.org/project/claude-handoff/)
 [![Python](https://img.shields.io/pypi/pyversions/claude-handoff)](https://pypi.org/project/claude-handoff/)

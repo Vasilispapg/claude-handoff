@@ -1,0 +1,161 @@
+<svg viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" font-family="'SF Mono','JetBrains Mono',Consolas,Menlo,monospace" role="img" aria-label="claude-handoff: noisy session transcripts distilled into a clean handoff.md and standing project memory">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1120"/>
+      <stop offset="100%" stop-color="#141d36"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+    <linearGradient id="fadeTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#101830"/><stop offset="100%" stop-color="#101830" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="fadeBot" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#101830"/><stop offset="100%" stop-color="#101830" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="noiseClip"><rect x="42" y="168" width="252" height="184"/></clipPath>
+  </defs>
+
+  <style>
+    .t-title{font-size:34px;font-weight:700;fill:#f8fafc;letter-spacing:-0.5px}
+    .t-tag{font-size:14px;fill:#94a3b8}
+    .t-label{font-size:11.5px;font-weight:700;fill:#cbd5e1;letter-spacing:1.2px}
+    .t-noise{font-size:12px;fill:#64748b}
+    .t-row{font-size:12.5px;fill:#e2e8f0}
+    .t-dim{font-size:12.5px;fill:#94a3b8}
+    .t-cite{font-size:11px;fill:#34d399}
+    .t-chip{font-size:16px;font-weight:700;fill:#0b1120}
+    .t-dest{font-size:12px;fill:#94a3b8}
+    .card{fill:#111a30;stroke:#293452;stroke-width:1.5}
+    .wire{stroke:#334155;stroke-width:1.5;fill:none}
+
+    .noise-roll{animation:roll 9s linear infinite}
+    @keyframes roll{from{transform:translateY(0)}to{transform:translateY(-187px)}}
+
+    .chip-pulse{animation:chip 4.5s ease-in-out infinite}
+    @keyframes chip{0%,55%,100%{filter:none}60%,70%{filter:drop-shadow(0 0 7px #fbbf24)}}
+
+    .dot{opacity:0}
+    .dot-a{animation:travelA 9s linear infinite}
+    .dot-b{animation:travelB 9s linear infinite}
+    @keyframes travelA{0%,6%{opacity:0;transform:translate(0,0)}10%{opacity:1}
+      24%{opacity:1;transform:translate(212px,0)}30%,100%{opacity:0;transform:translate(212px,0)}}
+    @keyframes travelB{0%,50%{opacity:0;transform:translate(0,0)}54%{opacity:1}
+      62%{opacity:1;transform:translate(150px,52px)}
+      72%{opacity:1;transform:translate(212px,104px)}78%,100%{opacity:0;transform:translate(212px,104px)}}
+
+    .land{opacity:0}
+    .land-a1{animation:land 9s ease-out infinite;animation-delay:0s}
+    .land-a2{animation:land 9s ease-out infinite;animation-delay:.35s}
+    .land-a3{animation:land 9s ease-out infinite;animation-delay:.7s}
+    .land-a4{animation:land 9s ease-out infinite;animation-delay:1.05s}
+    @keyframes land{0%,10%{opacity:.22;transform:translateX(-5px)}18%,92%{opacity:1;transform:translateX(0)}100%{opacity:.22;transform:translateX(-5px)}}
+    .land-b1{animation:landb 9s ease-out infinite}
+    @keyframes landb{0%,58%{opacity:.22;transform:translateX(-5px)}68%,96%{opacity:1;transform:translateX(0)}100%{opacity:.22}}
+
+    .dest-a{animation:desta 9s ease-out infinite}
+    @keyframes desta{0%,26%{opacity:.35}32%,88%{opacity:1}96%,100%{opacity:.35}}
+    .dest-b{animation:destb 9s ease-out infinite}
+    @keyframes destb{0%,74%{opacity:.35}80%,94%{opacity:1}100%{opacity:.35}}
+
+    @media (prefers-reduced-motion:reduce){
+      *{animation:none !important}
+      .dot{opacity:0 !important}
+      .land,.land-a1,.land-a2,.land-a3,.land-a4,.land-b1{opacity:1 !important;transform:none !important}
+      .chip-pulse{filter:none !important}
+      .dest-a,.dest-b{opacity:1 !important}
+    }
+  </style>
+
+  <rect x="0" y="0" width="960" height="420" rx="24" fill="url(#bg)"/>
+  <rect x="1" y="1" width="958" height="418" rx="23" fill="none" stroke="#293452" stroke-width="1.5"/>
+
+  <!-- Title -->
+  <text x="42" y="58" class="t-title">claude-handoff</text>
+  <text x="42" y="84" class="t-tag">rescue any session — even a crashed one · give Claude a memory of the whole project</text>
+
+  <!-- LEFT: the endless noisy transcript -->
+  <rect x="42" y="128" width="252" height="238" rx="14" class="card"/>
+  <text x="64" y="156" class="t-label">SESSION .JSONL</text>
+  <g clip-path="url(#noiseClip)">
+    <g class="noise-roll" transform="translate(64,0)">
+      <g class="t-noise">
+        <text y="184">{"type":"tool_use","name":"Bash"…</text>
+        <text y="201">thinking ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒</text>
+        <text y="218">tool_result · 3,491 lines</text>
+        <text y="235">&lt;system-reminder&gt;……………</text>
+        <text y="252">{"type":"tool_use","name":"Read"…</text>
+        <text y="269">agent-a1b2… (subagent lane)</text>
+        <text y="286">tool_result · 812 lines</text>
+        <text y="303">{"isSidechain":true,"agentId"…</text>
+        <text y="320">thinking ▒▒▒▒▒▒▒▒▒▒▒</text>
+        <text y="337">{"type":"tool_use","name":"Edit"…</text>
+        <text y="354">&lt;command-args&gt;…&lt;/command-args&gt;</text>
+        <!-- duplicate block for seamless loop (offset 187 = 11 lines × 17) -->
+        <text y="371">{"type":"tool_use","name":"Bash"…</text>
+        <text y="388">thinking ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒</text>
+        <text y="405">tool_result · 3,491 lines</text>
+        <text y="422">&lt;system-reminder&gt;……………</text>
+        <text y="439">{"type":"tool_use","name":"Read"…</text>
+        <text y="456">agent-a1b2… (subagent lane)</text>
+        <text y="473">tool_result · 812 lines</text>
+        <text y="490">{"isSidechain":true,"agentId"…</text>
+        <text y="507">thinking ▒▒▒▒▒▒▒▒▒▒▒</text>
+        <text y="524">{"type":"tool_use","name":"Edit"…</text>
+        <text y="541">&lt;command-args&gt;…&lt;/command-args&gt;</text>
+      </g>
+    </g>
+  </g>
+  <rect x="43" y="168" width="250" height="26" fill="url(#fadeTop)"/>
+  <rect x="43" y="326" width="250" height="26" fill="url(#fadeBot)"/>
+  <text x="64" y="384" class="t-noise" font-size="11">2,000,000 chars · crashed at 02:14</text>
+
+  <!-- wires -->
+  <path class="wire" d="M294 214 H 360"/>
+  <path class="wire" d="M430 214 H 494"/>
+  <path class="wire" d="M430 214 C 462 214 462 318 494 318"/>
+
+  <!-- CENTER: the machine -->
+  <g class="chip-pulse">
+    <rect x="360" y="196" width="70" height="36" rx="10" fill="url(#amber)"/>
+    <text x="395" y="220" text-anchor="middle" class="t-chip">chf</text>
+  </g>
+
+  <!-- travelling condensed lines -->
+  <g>
+    <circle class="dot dot-a" cx="300" cy="214" r="4.5" fill="#fbbf24"/>
+    <circle class="dot dot-b" cx="300" cy="214" r="4.5" fill="#34d399"/>
+  </g>
+
+  <!-- RIGHT TOP: handoff.md -->
+  <rect x="494" y="140" width="300" height="128" rx="14" class="card"/>
+  <text x="516" y="168" class="t-label">handoff.md</text>
+  <g>
+    <text x="516" y="192" class="t-row land land-a1">goal — fix limiter 429s under load</text>
+    <text x="516" y="211" class="t-row land land-a2">decisions — limiter → Redis, and why</text>
+    <text x="516" y="230" class="t-row land land-a3">files changed · commands run</text>
+    <text x="516" y="249" class="t-row land land-a4">next steps — sliding-window tests</text>
+  </g>
+  <g class="dest-a">
+    <path class="wire" d="M794 204 H 828"/>
+    <text x="832" y="192" class="t-dest">paste into</text>
+    <text x="832" y="210" class="t-dest" fill="#e2e8f0">Claude</text>
+    <text x="832" y="227" class="t-dest" fill="#e2e8f0">ChatGPT</text>
+    <text x="832" y="244" class="t-dest" fill="#e2e8f0">Gemini</text>
+  </g>
+
+  <!-- RIGHT BOTTOM: project memory -->
+  <rect x="494" y="284" width="300" height="98" rx="14" class="card"/>
+  <text x="516" y="312" class="t-label" fill="#a7f3d0">PROJECT MEMORY</text>
+  <g>
+    <text x="516" y="336" class="t-dim">JWT in httpOnly cookies <tspan class="t-cite">[a1b2c3]</tspan></text>
+    <text x="516" y="355" class="t-row land-b1 land">limiter → Redis, per-user window <tspan class="t-cite">[e5f6a7]</tspan></text>
+  </g>
+  <g class="dest-b">
+    <path class="wire" d="M794 333 H 828"/>
+    <text x="832" y="329" class="t-dest">injected into</text>
+    <text x="832" y="346" class="t-dest" fill="#e2e8f0">every new</text>
+    <text x="832" y="363" class="t-dest" fill="#e2e8f0">session</text>
+  </g>
+</svg>

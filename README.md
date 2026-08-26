@@ -20,6 +20,8 @@ instructions to the receiving assistant, so you can paste it straight into
 Gemini, GPT, claude.ai, or a fresh Claude Code session with zero extra
 prompting.
 
+![chf -o clipboard in action — five seconds from session to paste-ready handoff](docs/assets/demo.gif)
+
 Claude Code stores every session locally as JSONL
 (`~/.claude/projects/…/*.jsonl`), full of tool calls, tool results, thinking
 blocks and system reminders. Existing exporters dump all of that into

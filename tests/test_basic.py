@@ -1703,16 +1703,16 @@ class AnonymizeTests(unittest.TestCase):
     """--anonymize: strip identity (paths, emails, IPs) for public sharing."""
 
     def test_anonymize_text_patterns(self):
-        text = ("see /Users/vspapg/Code/app/main.py and mail me at "
-                "v.pap@example.com from 192.168.1.77; vspapg wrote it")
-        out, n = ch.anonymize_text(text, home=Path("/Users/vspapg"))
+        text = ("see /Users/devuser/Code/app/main.py and mail me at "
+                "v.dev@example.com from 192.168.1.77; devuser wrote it")
+        out, n = ch.anonymize_text(text, home=Path("/Users/devuser"))
         self.assertIn("~/Code/app/main.py", out)
-        self.assertNotIn("/Users/vspapg", out)
+        self.assertNotIn("/Users/devuser", out)
         self.assertIn("[EMAIL]", out)
-        self.assertNotIn("v.pap@example.com", out)
+        self.assertNotIn("v.dev@example.com", out)
         self.assertIn("[IP]", out)
         self.assertNotIn("192.168.1.77", out)
-        self.assertNotIn("vspapg", out)               # bare username too
+        self.assertNotIn("devuser", out)              # bare username too
         self.assertGreaterEqual(n, 4)
 
     def test_short_usernames_left_alone(self):
@@ -1838,6 +1838,13 @@ class ZeroTrustTests(unittest.TestCase):
 
 
 class HelperTests(unittest.TestCase):
+    def test_tilde_collapses_home(self):
+        home = Path.home()
+        self.assertEqual(ch.textutil.tilde(home / "x" / "y.jsonl"),
+                         "~/x/y.jsonl")
+        self.assertEqual(ch.textutil.tilde(Path("/opt/z")), "/opt/z")
+
+
     def test_truncate_short_passthrough(self):
         self.assertEqual(ch.truncate("abc", 10), "abc")
 

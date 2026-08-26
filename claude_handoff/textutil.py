@@ -5,6 +5,7 @@ import os
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 
 NOISE_RE = re.compile(
     r"<system-reminder>.*?</system-reminder>"
@@ -95,3 +96,9 @@ def debug(context: str, error) -> None:
     failures that are tolerated by design (corrupt lines, cache misses)."""
     if debug_enabled():
         warn(context, error)
+
+
+def tilde(path) -> str:
+    """~-collapsed path for human-facing messages."""
+    text, home = str(path), str(Path.home())
+    return "~" + text[len(home):] if text.startswith(home + os.sep) else text

@@ -154,6 +154,12 @@ def debug(context: str, error) -> None:
         warn(context, error)
 
 
+def tilde(path) -> str:
+    """~-collapsed path for human-facing messages."""
+    text, home = str(path), str(Path.home())
+    return "~" + text[len(home):] if text.startswith(home + os.sep) else text
+
+
 # --------------------------------------------------------------------------- #
 #  redact
 # --------------------------------------------------------------------------- #
@@ -2546,7 +2552,7 @@ def resolve_source(args: argparse.Namespace) -> Path:
             + (f" matching '{args.project}'" if args.project else "")
             + ". Pass a .jsonl path explicitly, or run --list.")
     source = _newest_meaningful_session(sessions)
-    print(f"Using latest session: {source}", file=sys.stderr)
+    print(f"Using latest session: {tilde(source)}", file=sys.stderr)
     return source
 
 

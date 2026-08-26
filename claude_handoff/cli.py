@@ -51,6 +51,7 @@ from .render import (
     render_sidechains,
     render_transcript,
 )
+from .textutil import tilde
 from .webexport import is_web_export, list_export_conversations, parse_web_export
 
 
@@ -235,7 +236,7 @@ def resolve_source(args: argparse.Namespace) -> Path:
             + (f" matching '{args.project}'" if args.project else "")
             + ". Pass a .jsonl path explicitly, or run --list.")
     source = _newest_meaningful_session(sessions)
-    print(f"Using latest session: {source}", file=sys.stderr)
+    print(f"Using latest session: {tilde(source)}", file=sys.stderr)
     return source
 
 

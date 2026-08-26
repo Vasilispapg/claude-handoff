@@ -37,6 +37,8 @@ claude-handoff/
 │   ├── ci.yml             ← tests on Linux/macOS/Windows × Python 3.9/3.13
 │   └── publish.yml        ← PyPI trusted publishing on GitHub release
 ├── docs/
+│   ├── GUIDE.md           ← a day with the tool: walkthrough, --brief
+│   │                        step-by-step, honest cost table, cheatsheet
 │   ├── DEVELOPMENT.md     ← schema notes, architecture, design decisions,
 │   │                        zero-trust & failure model, testing, limits
 │   └── RESEARCH.md        ← (gitignored) market research & gap analysis

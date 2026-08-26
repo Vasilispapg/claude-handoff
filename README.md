@@ -160,6 +160,9 @@ from a hook**; the distilled part refreshes only when you say so. The brief
 carries a freshness stamp, and both the file and the injection warn when
 newer sessions exist. Fully local; redaction applies as everywhere.
 
+→ Step-by-step mechanics, the honest cost table, and a full day-with-it
+walkthrough: **[docs/GUIDE.md](docs/GUIDE.md)**.
+
 ## Make it automatic
 
 ```bash
@@ -445,7 +448,7 @@ and invariants for both human and AI contributors).
 
 ## Learn more
 
-[INDEX.md](INDEX.md) — file map · [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — architecture, JSONL schema notes, design decisions · [AGENTS.md](AGENTS.md) — contributor guide for AI coding agents · [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md)
+[docs/GUIDE.md](docs/GUIDE.md) — **a day with claude-handoff**: walkthrough, how `--brief` works step by step, honest cost table, cheatsheet · [INDEX.md](INDEX.md) — file map · [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — architecture, JSONL schema notes, design decisions · [AGENTS.md](AGENTS.md) — contributor guide for AI coding agents · [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md)
 
 ## License
 

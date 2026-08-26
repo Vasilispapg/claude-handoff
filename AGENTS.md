@@ -25,7 +25,7 @@ Orientation — read in this order, only as far as your task needs:
 
 | You want to… | Read |
 |---|---|
-| Understand what the tool does for users | `README.md` (60-second scenarios + full flag reference) |
+| Understand what the tool does for users | `README.md` (60-second scenarios + full flag reference), `docs/GUIDE.md` (day-with-it walkthrough + --brief mechanics) |
 | Find which file holds what | `INDEX.md`, then the architecture map below |
 | Touch the parser / JSONL schema | `docs/DEVELOPMENT.md` §2 (schema notes) — **mandatory before parser edits** |
 | Understand why a design is the way it is | `docs/DEVELOPMENT.md` §3 (decision log, one row per decision) |

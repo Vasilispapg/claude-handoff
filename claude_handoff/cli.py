@@ -91,20 +91,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
                '  claude-handoff "login bug" --llm claude-cli   # positional works as a name too\n'
                '  claude-handoff --project myrepo -o -\n',
     )
-    ap.add_argument("session", nargs="?",
-                    help="path to a session .jsonl, or a name to search for "
-                         "(default: latest session)")
+    ap.add_argument("session", nargs="*",
+                    help="path to a session .jsonl, or a name to search "
+                         "for (default: latest session); several paths "
+                         "merge into ONE handoff")
     ap.add_argument("--list", action="store_true",
                     help="list available sessions (title · first prompt) and exit")
     ap.add_argument("--name", metavar="QUERY",
                     help="pick newest session whose title or first prompt "
                          "contains QUERY (case-insensitive)")
-    ap.add_argument("--grep", metavar="TEXT",
+    ap.add_argument("--grep", metavar="TEXT", action="append",
                     help="pick newest session whose conversation contains "
-                         "TEXT (case-insensitive; combines with --list/-i "
-                         "to show all matches)")
-    ap.add_argument("--project", metavar="NAME",
-                    help="pick latest session whose project path contains NAME")
+                         "TEXT (case-insensitive; repeat the flag to "
+                         "require ALL terms; with --list/-i shows every "
+                         "match)")
+    ap.add_argument("--project", metavar="NAME", action="append",
+                    help="pick latest session whose project path contains "
+                         "NAME (repeat the flag to include several "
+                         "projects)")
     ap.add_argument("--brief", action="store_true",
                     help="distill EVERY session of the project into one "
                          "memory brief (~/.claude/briefs/<project>.md); "
@@ -193,8 +197,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def resolve_source(args: argparse.Namespace) -> Path:
     """The session file to export: explicit path, picker, name match, or
     newest in scope."""
+    session = args.session
+    if isinstance(session, list):
+        session = session[0] if session else None
     if args.grep:
-        if args.session or args.name:
+        if session or args.name:
             raise SystemExit("--grep searches content on its own — combine "
                              "it with --project/--any, not a path or --name.")
         scope = args.project
@@ -208,15 +215,15 @@ def resolve_source(args: argparse.Namespace) -> Path:
         print(f"Using session {source.stem[:8]} — 🔍 {preview}",
               file=sys.stderr)
         return source
-    if args.session:
-        source = Path(args.session).expanduser()
+    if session:
+        source = Path(session).expanduser()
         if source.is_file():
             return source
-        looks_like_path = "/" in args.session or args.session.endswith(".jsonl")
+        looks_like_path = "/" in session or session.endswith(".jsonl")
         if looks_like_path:
             raise SystemExit(f"Not a file: {source}. "
                              f"Run `claude-handoff --list` to see sessions.")
-        return _newest_named_session(args.session, args.project)
+        return _newest_named_session(session, args.project)
     if args.name:
         return _newest_named_session(args.name, args.project)
     scope = args.project
@@ -378,6 +385,11 @@ def _load_config() -> dict:
 def _run_brief(args: argparse.Namespace) -> None:
     """--brief: whole-project memory document (see brief.py)."""
     scope = args.project
+    if isinstance(scope, list):
+        if len(scope) > 1:
+            raise SystemExit("--brief needs a single project — pass "
+                             "one --project.")
+        scope = scope[0] if scope else None
     if not scope and not args.any:
         scope = cwd_project_filter()
     if not scope:
@@ -452,14 +464,35 @@ def main(argv: list[str] | None = None) -> None:
         install_hook(remove=args.uninstall_hook)
         return
     if args.list:
-        if args.session and is_web_export(Path(args.session).expanduser()):
-            list_export_conversations(Path(args.session).expanduser())
+        one = args.session[0] if len(args.session) == 1 else None
+        if one and is_web_export(Path(one).expanduser()):
+            list_export_conversations(Path(one).expanduser())
         else:
             list_sessions(args.project, grep=args.grep,
                           as_json=args.format == "json")
         return
     if args.brief:
         _run_brief(args)
+        return
+    if len(args.session) > 1:
+        sources = [Path(p).expanduser() for p in args.session]
+        missing = [str(x) for x in sources if not x.is_file()]
+        if missing:
+            raise SystemExit(f"Not a file: {', '.join(missing)}. "
+                             f"Several arguments merge as paths — run "
+                             f"--list to find sessions by name.")
+        if args.merge:
+            raise SystemExit("Several paths already merge on their "
+                             "own — drop --merge.")
+        parsed_list = [parse_web_export(x) if is_web_export(x)
+                       else parse_session(x) for x in sources]
+        parsed_list = [p for p in parsed_list if p["turns"]]
+        parsed_list.sort(key=lambda p: p["meta"]["first_ts"] or "")
+        print(f"Merging {len(parsed_list)} sessions.", file=sys.stderr)
+        parsed = merge_parsed(parsed_list)
+        source = Path(f"{len(parsed_list)} merged sessions")
+        slice_turns(parsed, last=args.last, since=args.since)
+        write_output(build_document(parsed, source, args), parsed, args)
         return
     picked: list = []
     if args.interactive and not args.merge:

@@ -143,7 +143,9 @@ and writes one memory document to `~/.claude/briefs/<project>.md`:
   it came from (`chf --name <id>` opens the source).
 
 Per-session notes are cached, so refreshing after new sessions only pays
-for the new ones.
+for the new ones — and a monster session (beyond ~120k chars) is
+map-reduced *inside* the note, so the memory path never truncates:
+nothing is silently dropped, at any size.
 
 ```bash
 chf --install-brief-hook
@@ -211,6 +213,8 @@ chf --list --format json           # the same, machine-readable
 chf --name "login bug"             # newest session whose title/prompt matches
 chf "login bug"                    # same — a non-path argument is a name search
 chf --grep "CORS"                  # newest session that *talked about* CORS
+chf --grep CORS --grep auth        # …that talked about BOTH (AND)
+chf a.jsonl b.jsonl                # several paths → ONE merged handoff
 chf --project myrepo               # latest session of a specific project
 chf path/to/session.jsonl -o -     # explicit file → stdout
 chf -o clipboard                   # straight to the clipboard — go paste it
@@ -375,8 +379,8 @@ Set `PYTHONUTF8=1` (the CI runs the whole suite that way).
 |---|---|
 | `--list` | list sessions (date, size, project, title · first prompt); with a `conversations.json`, list its chats |
 | `--name QUERY` | pick newest session (or web conversation) whose title/first prompt contains QUERY |
-| `--grep TEXT` | pick newest session whose *conversation* contains TEXT; with `--list`/`-i` shows every match with a 🔍 preview |
-| `--project NAME` | pick latest session whose project path contains NAME |
+| `--grep TEXT` | pick newest session whose *conversation* contains TEXT (repeat the flag to require ALL terms); with `--list`/`-i` shows every match with a 🔍 preview |
+| `--project NAME` | pick latest session whose project path contains NAME (repeatable — several projects together) |
 | `-i` / `--interactive` | pick session(s) from a numbered list — `1,3` or `2-4` merges several into one handoff |
 | `--any` | ignore the current directory; consider every project's sessions |
 | `--last N` / `--since 2h` | keep only the tail of the conversation (N user turns / a time window) |

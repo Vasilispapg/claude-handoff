@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.15.0 — 2026-08-26
+
+- **No size limit for project memory**: sessions beyond the per-note
+  budget are now map-reduced *inside* the note (chunk notes on turn
+  boundaries + one synthesis, all cached) — the brief inherits the
+  same nothing-silently-dropped guarantee as `--llm`, at any size.
+- **Multi params**: `chf a.jsonl b.jsonl …` merges several sessions
+  into one handoff; `--grep X --grep Y` requires ALL terms (AND);
+  `--project A --project B` searches several projects together.
+
 ## 0.14.0 — 2026-08-26
 
 - **Prompt-injection defense**: every LLM prompt that consumes a

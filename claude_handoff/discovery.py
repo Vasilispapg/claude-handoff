@@ -17,9 +17,14 @@ PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "p
 #  Session discovery
 # --------------------------------------------------------------------------- #
 
-def find_sessions(project_filter: str | None = None,
+def find_sessions(project_filter=None,
                   projects_dir: Path | None = None) -> list[Path]:
-    """All session JSONL files, newest first."""
+    """All session JSONL files, newest first. `project_filter` is a
+    substring, a list of substrings (a project matches ANY of them),
+    or None for every project."""
+    filters = [f.lower() for f in
+               ([project_filter] if isinstance(project_filter, str)
+                else project_filter or [])]
     projects_dir = projects_dir or PROJECTS_DIR
     if not projects_dir.is_dir():
         return []
@@ -27,7 +32,7 @@ def find_sessions(project_filter: str | None = None,
     for proj in sorted(projects_dir.iterdir()):
         if not proj.is_dir():
             continue
-        if project_filter and project_filter.lower() not in proj.name.lower():
+        if filters and not any(f in proj.name.lower() for f in filters):
             continue
         sessions.extend(p for p in proj.glob("*.jsonl") if p.stat().st_size > 0)
     return sorted(sessions, key=lambda p: p.stat().st_mtime, reverse=True)
@@ -146,19 +151,34 @@ def _may_contain(path: Path, needle: str,
         return None  # unreadable — caller counts it
 
 
-def grep_sessions(pattern: str,
-                  project_filter: str | None = None) -> list[tuple]:
+def _find_needle(parsed: dict, needle: str) -> str | None:
+    """Preview around the first hit of one needle, or None."""
+    for turn in parsed["turns"]:
+        if turn["role"] not in ("user", "assistant"):
+            continue
+        text = "\n".join(turn["text_parts"])
+        idx = text.lower().find(needle)
+        if idx >= 0:
+            start = max(0, idx - 40)
+            return one_line(text[start:idx + len(needle) + 40], 100)
+    return None
+
+
+def grep_sessions(patterns,
+                  project_filter=None) -> list[tuple]:
     """Sessions whose conversation text (user/assistant turns) contains
-    `pattern` (case-insensitive substring), newest first, each paired with
-    a short match preview. Tool noise doesn't count — only what the human
-    and the assistant actually said."""
-    needle = pattern.lower()
-    prefilter = _raw_prefilter_ok(needle)
+    every given pattern (case-insensitive substrings, AND semantics),
+    newest first, each paired with a preview of the first pattern.
+    Tool noise doesn't count — only what was actually said."""
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    needles = [p.lower() for p in patterns]
+    scout = next((n for n in needles if _raw_prefilter_ok(n)), None)
     hits = []
     unreadable = 0
     for path in find_sessions(project_filter):
-        if prefilter:
-            scan = _may_contain(path, needle)
+        if scout:
+            scan = _may_contain(path, scout)
             if scan is None:
                 unreadable += 1
                 continue
@@ -169,16 +189,9 @@ def grep_sessions(pattern: str,
         except OSError:
             unreadable += 1
             continue  # an unreadable file must not kill the search
-        for turn in parsed["turns"]:
-            if turn["role"] not in ("user", "assistant"):
-                continue
-            text = "\n".join(turn["text_parts"])
-            idx = text.lower().find(needle)
-            if idx >= 0:
-                start = max(0, idx - 40)
-                preview = text[start:idx + len(needle) + 40]
-                hits.append((path, one_line(preview, 100)))
-                break
+        previews = [_find_needle(parsed, n) for n in needles]
+        if all(previews):
+            hits.append((path, previews[0]))
     if unreadable:
         warn("--grep", f"skipped {unreadable} unreadable file(s)")
     return hits

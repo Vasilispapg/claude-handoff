@@ -526,6 +526,73 @@ class FitTests(unittest.TestCase):
         self.assertIn("tokens", buf.getvalue())
 
 
+class MultiParamTests(unittest.TestCase):
+    """0.15.0: multiple positional paths merge; --grep ANDs; --project ORs."""
+
+    def test_multiple_paths_produce_merged_handoff(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "h.md"
+            with contextlib.redirect_stderr(io.StringIO()):
+                ch.main([str(COMPACTED), str(FIXTURE), "-o", str(out)])
+            doc = out.read_text(encoding="utf-8")
+        self.assertIn("Session 1", doc)
+        self.assertIn("Session 2", doc)
+        self.assertIn("rate limiting", doc)          # from COMPACTED
+        self.assertIn("unicode", doc)                # from FIXTURE
+
+    def test_multiple_paths_must_all_be_files(self):
+        with self.assertRaises(SystemExit) as cm:
+            ch.main(["nope-a.jsonl", "nope-b.jsonl"])
+        self.assertIn("file", str(cm.exception).lower())
+
+    def test_single_positional_name_still_works(self):
+        import contextlib
+        import io
+        with unittest.mock.patch.object(ch.discovery, "find_sessions",
+                                        lambda *a, **k: [FIXTURE]), \
+                contextlib.redirect_stderr(io.StringIO()):
+            args = ch.build_arg_parser().parse_args(["login bug"])
+            self.assertEqual(ch.resolve_source(args), FIXTURE)
+
+    def test_grep_and_semantics(self):
+        with unittest.mock.patch.object(
+                ch.discovery, "find_sessions",
+                lambda *a, **k: [AGENT_SESSION, FIXTURE]):
+            both = ch.grep_sessions(["unicode", "commit"])
+            self.assertEqual([p for p, _ in both], [FIXTURE])
+            self.assertEqual(ch.grep_sessions(["unicode", "zzz-nope"]), [])
+            single = ch.grep_sessions("unicode")     # str still accepted
+            self.assertEqual([p for p, _ in single], [FIXTURE])
+
+    def test_cli_grep_appends(self):
+        args = ch.build_arg_parser().parse_args(
+            ["--grep", "unicode", "--grep", "commit"])
+        self.assertEqual(args.grep, ["unicode", "commit"])
+
+    def test_find_sessions_accepts_many_project_filters(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            pd = Path(td)
+            for name in ("-projA", "-projB", "-projC"):
+                d = pd / name
+                d.mkdir()
+                (d / "s.jsonl").write_text('{"type":"summary"}\n',
+                                           encoding="utf-8")
+            hits = ch.find_sessions(["projA", "projC"], projects_dir=pd)
+            self.assertEqual(sorted(h.parent.name for h in hits),
+                             ["-projA", "-projC"])
+            one = ch.find_sessions("projB", projects_dir=pd)
+            self.assertEqual([h.parent.name for h in one], ["-projB"])
+
+    def test_brief_refuses_multiple_projects(self):
+        with self.assertRaises(SystemExit) as cm:
+            ch.main(["--brief", "--project", "a", "--project", "b"])
+        self.assertIn("single project", str(cm.exception))
+
+
 class GrepTests(unittest.TestCase):
     """--grep: find sessions by conversation content, not just title."""
 
@@ -1225,6 +1292,34 @@ class BriefTests(unittest.TestCase):
                 .read_text(encoding="utf-8")
         self.assertIn("decisions here", text)
 
+    def test_monster_session_note_is_map_reduced(self):
+        import contextlib
+        import io
+        calls = []
+        parsed = ch.parse_session(FIXTURE)
+        with self._fake_provider(calls), \
+                unittest.mock.patch.object(ch.brief, "NOTE_INPUT_CAP", 400), \
+                contextlib.redirect_stderr(io.StringIO()):
+            note = ch.brief._session_note(parsed, "claude-cli", None,
+                                          redact=True, use_cache=False)
+        # transcript >> 400 chars → several chunk notes + one synthesis,
+        # never a single truncated call
+        self.assertGreater(len(calls), 2)
+        self.assertIn("NOTE1", calls[-1])            # synthesis sees parts
+        self.assertIn("abc123", calls[-1])           # citation survives
+        self.assertTrue(note)
+
+    def test_small_session_note_is_one_call(self):
+        import contextlib
+        import io
+        calls = []
+        parsed = ch.parse_session(FIXTURE)
+        with self._fake_provider(calls), \
+                contextlib.redirect_stderr(io.StringIO()):
+            ch.brief._session_note(parsed, "claude-cli", None,
+                                   redact=True, use_cache=False)
+        self.assertEqual(len(calls), 1)
+
     def test_brief_to_stdout(self):
         import contextlib
         import io
@@ -1415,6 +1510,10 @@ class InjectionDefenseTests(unittest.TestCase):
                              ("CHUNK_PROMPT", ch.CHUNK_PROMPT),
                              ("SESSION_NOTE_PROMPT",
                               ch.brief.SESSION_NOTE_PROMPT),
+                             ("SESSION_CHUNK_PROMPT",
+                              ch.brief.SESSION_CHUNK_PROMPT),
+                             ("SESSION_NOTE_REDUCE_PROMPT",
+                              ch.brief.SESSION_NOTE_REDUCE_PROMPT),
                              ("BRIEF_PROMPT", ch.brief.BRIEF_PROMPT)):
             self.assertIn("not instructions", prompt,
                           f"{name} lacks the injection guard")

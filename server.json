@@ -6,13 +6,13 @@
     "url": "https://github.com/Vasilispapg/claude-handoff",
     "source": "github"
   },
-  "version": "0.14.0",
+  "version": "0.15.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "claude-handoff",
-      "version": "0.14.0",
+      "version": "0.15.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

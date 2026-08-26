@@ -58,7 +58,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
-__version__ = "0.18.0"
+__version__ = "0.19.0"
 
 
 # --------------------------------------------------------------------------- #

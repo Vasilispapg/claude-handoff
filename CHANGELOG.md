@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.19.0 — 2026-08-26
 
 - **Standing memory from a web history**: `chf conversations.json
   --brief -o brief.md` distills EVERY conversation of a claude.ai or

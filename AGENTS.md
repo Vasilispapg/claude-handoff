@@ -117,10 +117,16 @@ Import direction flows strictly downward (no cycles): `textutil` →
   subprocess), `build_brief_llm`
   (per-session notes, cached by prompt+content hash, then one reduce —
   `SESSION_NOTE_PROMPT` / `BRIEF_PROMPT`), `brief_path` (~/.claude/briefs),
-  freshness stamps (`make_stamp`/`parse_stamp`), `graft_distilled`
+  freshness stamps (`make_stamp`/`parse_stamp` — optional `exclude=`/
+  `keep=` fields make session selection sticky), `apply_excludes`/
+  `apply_keep`/`parse_keep` (drop sessions by id prefix / window to
+  first:N,last:M — re-applied on every rebuild), `graft_distilled`
   (carry an existing distilled section + freshness notes onto a fresh
   skeleton — used by BOTH the SessionEnd refresh and the plain `--brief`
-  rebuild so a paid distillation is never discarded), `update_brief_skeleton`
+  rebuild so a paid distillation is never discarded; notes list the
+  delta itself via `_commit_bullets` and the undistilled session
+  titles), `_announce` (progress event: live bar on a TTY, plain line
+  otherwise), `update_brief_skeleton`
   (SessionEnd refresh — existing stamped briefs only). Hook side lives in
   integrations.py: `install_brief_hook` (installs BOTH SessionStart inject
   + SessionEnd update), `run_brief_hook_mode` (plain stdout becomes
@@ -136,7 +142,9 @@ Import direction flows strictly downward (no cycles): `textutil` →
   `redact_doc`/`anonymize_text` (output redaction & --anonymize),
   `_parse_budget`/`_fit_transcript_cap` (--fit token budgets),
   `_load_config` (config defaults; no_redact is deliberately not
-  configurable), `_run_brief`, `build_document`, `write_output`, `main`
+  configurable), `_run_brief` (with `_resolve_excludes`/`_pick_excludes`
+  — bare `--exclude` opens a numbered multi-select built on
+  `_parse_pick`), `build_document`, `write_output`, `main`
 
 ## Workflows — follow these checklists
 

@@ -22,8 +22,19 @@ context:
 # Project brief: /home/you/shop-api
 ...
 ## Distilled memory
+### What this is
+Shop-api is a FastAPI storefront backend (Postgres, Redis) — v0.9 deployed
+to staging, rate-limiter rework in flight [a1b2c3d4][e5f6a7b8]
+### Where things stand
+- Done & verified: JWT auth moved to httpOnly cookies, 214 tests green [a1b2c3d4]
+- In flight: rate limiter — Redis backend landed, refresh-token path stopped
+  at the retry logic [e5f6a7b8]
 ### Decisions
 - JWT lives in httpOnly cookies, not localStorage — smaller XSS surface [a1b2c3d4]
+...
+### Open threads
+- [in flight] Finish limiter retry logic — next: exponential backoff in
+  `limiter.py` [e5f6a7b8]
 ...
 </project-memory>
 ```
@@ -123,13 +134,15 @@ chf --brief --llm claude-cli
 ```
 
 ```
-brief note 4/5 (5db308c0)      ← cache hit, instant
-brief note 5/5 (b101c829)      ← the only session that changed
-Wrote brief ~/.claude/briefs/-home-you-shop-api.md (5 sessions, ≈1.7k tokens)
+Distilling 5 session(s) with claude-cli — at least 6 LLM call(s), sequential; parts of large sessions add more.
+[████████████████████░░░░] 5/6 chunks | 38s elapsed | ~8s left | synthesizing project memory from 5 notes…
+Wrote brief ~/.claude/briefs/-home-you-shop-api.md (5 sessions, ≈1.9k tokens)
 ```
 
-Per-session notes are cached by content — you pay only for sessions that
-are new or grew, plus one synthesis pass.
+The plan line prints before the first call and the bar ticks *during*
+each one — a distillation never looks hung. Per-session notes are cached
+by content: you pay only for sessions that are new or grew, plus one
+synthesis pass (cache hits show as instantly-completed steps).
 
 ---
 
@@ -163,12 +176,23 @@ exchange for a permanent blind spot — and since every note is cached
 ever**.
 
 **Reduce:** all session notes (chronological — on conflicts the later
-session wins) → one `## Distilled memory` of ≤600 words, citations kept,
-in your language. `--focus` applies only here, so cached notes stay
-reusable across different focuses.
+session wins) → one `## Distilled memory` of ≤800 words, citations kept,
+in your language: `What this is` (product, stack, current state),
+`Where things stand` (done-and-verified / in flight with where it
+stopped / not started), Decisions / Fixed / Conventions, and
+`Open threads` as an ordered resume plan — concrete next action per
+bullet, tagged `[in flight]` / `[blocked]` / `[not started]`. `--focus`
+applies only here, so cached notes stay reusable across different
+focuses.
+
+**Curating the input:** `--exclude <id>` leaves sessions out entirely
+(bare `--exclude` opens a numbered picker) and `--keep first:2,last:20`
+windows a huge history. Both are stored in the stamp, so hooks and
+every later rebuild re-apply them — `--keep` becomes a sliding window.
 
 **Then:** redaction → freshness stamp (session count, newest mtime,
-distillation age) → written to `~/.claude/briefs/<project>.md`.
+distillation age, exclude/keep selection) → written to
+`~/.claude/briefs/<project>.md`.
 
 ## What it costs, honestly
 
@@ -211,6 +235,8 @@ chf --grep "CORS" --grep "auth"      # find by content (AND)
 chf --anonymize -o -                 # public-safe output
 chf --brief                          # free factual memory
 chf --brief --llm claude-cli         # distilled memory (cached, cited)
+chf --brief --exclude                # picker: leave sessions out (sticky)
+chf --brief --keep first:2,last:20   # window a huge history (sliding)
 chf --install-brief-hook             # inject memory into every session
 chf --install-hook                   # auto-handoff on session end
 chf --debug ...                      # show every tolerated failure

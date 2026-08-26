@@ -40,10 +40,11 @@ since it can read your *entire* history, a **project memory brief** too.
   of subagents (`agent-*.jsonl`), whose full transcripts stay behind
   `--include-sidechains`.
 - **Project memory.** `chf --brief` distills a project's ENTIRE session
-  history into one living brief (decisions, fixes, conventions, open
-  threads — with session citations); `--install-brief-hook` injects it into
-  every new Claude Code session, so Claude starts already knowing the
-  project.
+  history into one living brief — what this is, where things stand,
+  decisions, fixes, conventions, and an ordered resume plan of open
+  threads, every claim citing its session; `--install-brief-hook` injects
+  it into every new Claude Code session, so Claude starts already knowing
+  the project.
 - **Safe to paste.** Secret-looking strings (API keys, tokens,
   `password=`…) are redacted from every output — the handoff you paste into
   a web chat is egress too. `--anonymize` goes further for public sharing.
@@ -138,9 +139,13 @@ on your disk. `chf --brief` reads **every** session of the current project
 and writes one memory document to `~/.claude/briefs/<project>.md`:
 
 - a factual **session timeline** + most-touched files (deterministic, free);
-- with `--llm`, a **distilled memory** — decisions with their why, fixed
-  bugs, conventions, open threads — every bullet cited with the session id
-  it came from (`chf --name <id>` opens the source).
+- with `--llm`, a **distilled memory** that opens with *what this is*
+  (product, stack, current state) and *where things stand* (done / in
+  flight / not started), then decisions with their why, fixed bugs,
+  conventions — and *open threads* as an ordered resume plan, each with
+  its concrete next action and a `[in flight]` / `[blocked]` /
+  `[not started]` tag. Every bullet cites the session id it came from
+  (`chf --name <id>` opens the source).
 
 ![chf --brief in action — the whole project history distilled into cited memory](docs/assets/demo-brief.gif)
 
@@ -371,6 +376,12 @@ tool scopes to that project; pass `--any` to search everything.
 Run `claude` once and log in (`/login`). It works even when invoked from
 *inside* a Claude Code session — inherited `CLAUDE*` env vars are scrubbed
 so the nested CLI authenticates like a fresh one.
+
+**`--llm claude-cli` fails with "Credit balance is too low"**
+An `ANTHROPIC_API_KEY` exported in your shell was winning over your
+Pro/Max login and billing an (empty) Console account. Since 0.18.0 the
+key is scrubbed from the spawned CLI automatically — upgrade if you see
+this on an older version, or `unset ANTHROPIC_API_KEY` for the run.
 
 **"Set ANTHROPIC_API_KEY … to use --llm claude"**
 API providers need a key in the environment — see the table above. No key

@@ -196,7 +196,7 @@ session, and hooks never trigger LLM calls or create files on their own.
 - Activity: 2 user messages, 2 assistant replies, 4 tool calls
 
 ## Files created / modified
-- /home/you/myapp/auth.py
+- auth.py
 
 ## Commands run
 - python -m pytest tests/test_auth.py -q

@@ -16,11 +16,13 @@
   multi-agent session dropped from "333 user messages" to the 94 the
   human actually sent, with "240 background notification(s)" named in
   the header. `<local-command-caveat>` wrappers are stripped as noise.
-- **File inventory capped and ranked**: `## Files created / modified`
-  shows the top 40 by edit count (was: every file, alphabetically —
-  546 bullets on that same session, starving the transcript budget);
-  scratchpad/temp files fold into one `…plus N` line; the full list
-  stays available with `--format json`.
+- **File inventory capped, ranked, and relative**: `## Files created /
+  modified` shows the top 15 by edit count (was: every file,
+  alphabetically — 546 bullets on that same session, starving the
+  transcript budget), with paths relative to the project root the
+  header already names (`~`-collapsed when outside it);
+  scratchpad/temp files fold into one `…plus N` line; the full
+  absolute list stays available with `--format json`.
 - **Honest token line**: cache re-reads are split out —
   `39,185,271 in / 7,722,484 out (+3,900,024,478 cached reads)`
   instead of one meaningless 3.9-billion "in (incl. cache)" figure.

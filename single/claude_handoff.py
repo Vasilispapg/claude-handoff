@@ -1197,7 +1197,7 @@ DEFAULT_MAX_CHARS = 80_000       # global cap on the transcript section
 DIGEST_USER_CAP = 300
 DIGEST_ASSISTANT_CAP = 500
 DIGEST_COMPACT_CAP = 800
-FILES_CAP = 40                   # file-inventory bullets shown at most
+FILES_CAP = 15                   # file-inventory bullets shown at most
 _SCRATCH_PREFIXES = ("/tmp/", "/private/tmp/", "/var/folders/")
 
 
@@ -1251,9 +1251,21 @@ def _is_scratch(path: str) -> bool:
     return p.startswith(_SCRATCH_PREFIXES) or "/AppData/Local/Temp/" in p
 
 
+def _rel_path(path: str, cwd: str | None) -> str:
+    """Display path relative to the project root (the header names it);
+    ~-collapsed when it lives elsewhere. JSON keeps absolutes."""
+    if cwd:
+        for sep in ("/", "\\"):
+            root = cwd.rstrip("/\\") + sep
+            if path.startswith(root):
+                return path[len(root):]
+    return tilde(path)
+
+
 def render_activity(parsed: dict, max_commands: int = 30) -> str:
     out = []
     fw, fr, cmds = parsed["files_written"], parsed["files_read"], parsed["commands"]
+    cwd = parsed["meta"].get("cwd")
     if fw:
         # Most-edited first, capped: a 400-file inventory would eat the
         # context budget the conversation needs. Temp files fold into one line.
@@ -1264,7 +1276,7 @@ def render_activity(parsed: dict, max_commands: int = 30) -> str:
         if len(ranked) > FILES_CAP:
             out += [f"_(top {FILES_CAP} of {len(ranked)} by edit count — "
                     f"full list with --format json)_", ""]
-        out += [f"- `{f}`" + (f" ({n}× edits)" if n > 1 else "")
+        out += [f"- `{_rel_path(f, cwd)}`" + (f" ({n}× edits)" if n > 1 else "")
                 for f, n in ranked[:FILES_CAP]]
         if scratch:
             out.append(f"- _…plus {scratch} scratchpad/temp file(s)_")
@@ -1280,7 +1292,7 @@ def render_activity(parsed: dict, max_commands: int = 30) -> str:
         out.append("")
     if fr and not fw:
         out += ["## Files read", ""]
-        out += [f"- `{f}`" for f in sorted(fr)][:20]
+        out += [f"- `{_rel_path(f, cwd)}`" for f in sorted(fr)][:20]
         out.append("")
     n_agents = parsed["meta"].get("n_agents", 0)
     if n_agents:

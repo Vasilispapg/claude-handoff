@@ -2345,9 +2345,9 @@ class FilesSectionTests(unittest.TestCase):
         files_part = out.split("## Commands run")[0]
         lines = [ln for ln in files_part.splitlines()
                  if ln.startswith("- `")]
-        self.assertEqual(len(lines), 40)              # capped
+        self.assertEqual(len(lines), 15)              # capped
         self.assertIn("file49.py", lines[0])          # most-edited first
-        self.assertIn("top 40 of 50", out)
+        self.assertIn("top 15 of 50", out)
         self.assertIn("--format json", out)           # where the rest lives
 
     def test_scratch_files_grouped_not_listed(self):
@@ -2360,6 +2360,20 @@ class FilesSectionTests(unittest.TestCase):
         out = ch.render_activity(ch.parse_session(FIXTURE))
         self.assertIn("auth.py", out)
         self.assertNotIn("top ", out)
+
+    def test_paths_relative_to_project_root(self):
+        # header already names the root — repeating it 15 times is dead weight
+        parsed = ch.parse_session(FIXTURE)        # cwd=/home/vspapg/myapp
+        home_file = str(Path.home() / "notes" / "y.md")
+        parsed["files_written"][home_file] = 2
+        out = ch.render_activity(parsed)
+        self.assertIn("- `auth.py`", out)                     # under cwd
+        self.assertNotIn("- `/home/vspapg/myapp/auth.py`", out)
+        self.assertIn(f"- `{ch.textutil.tilde(home_file)}`", out)  # outside
+        # ground truth stays absolute in the machine-readable output
+        data = json.loads(ch.build_json(parsed, FIXTURE, summary=None))
+        self.assertIn("/home/vspapg/myapp/auth.py",
+                      data["activity"]["files_written"])
 
 
 class EmailNoticeTests(unittest.TestCase):

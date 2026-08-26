@@ -9,6 +9,10 @@
 - **Multi params**: `chf a.jsonl b.jsonl …` merges several sessions
   into one handoff; `--grep X --grep Y` requires ALL terms (AND);
   `--project A --project B` searches several projects together.
+- **Docs**: new `docs/GUIDE.md` (day-with-it walkthrough, `--brief`
+  step-by-step, honest cost table, cheatsheet); a second demo GIF shows
+  project memory end-to-end; brief/`Using latest session` messages print
+  ~-collapsed paths.
 
 ## 0.14.0 — 2026-08-26
 

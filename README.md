@@ -253,13 +253,19 @@ chf --anonymize                    # public-safe: ~ paths, no emails/IPs/usernam
 chf --project myrepo --merge       # whole project in ONE handoff, oldest → newest
 chf --format json -o session.json  # machine-readable handoff
 
-# LLM summaries (goal / decisions / current state / next steps):
+# LLM summaries (goal / decisions / current state / next steps).
+# --llm composes with EVERYTHING above — picker, --name/--grep/--project,
+# --merge, --last/--since, clipboard, JSON… (only --fit stays
+# deterministic-only, by design):
 chf --llm claude-cli               # your Claude Code login — no API key
 chf --llm ollama                   # local model — fully offline
 chf --llm claude                   # Anthropic API   (ANTHROPIC_API_KEY)
 chf --llm openai --model gpt-4o    # OpenAI API      (OPENAI_API_KEY)
 chf --llm gemini --with-transcript # Google API      (GEMINI_API_KEY)
 chf --llm claude-cli --focus "emphasize the API decisions"
+chf --grep CORS --llm claude-cli   # find the session, then summarize it
+chf -i --merge --llm claude-cli -o clipboard   # pick several → ONE summary, pasted
+chf --since 2h --llm claude-cli    # summarize just the last two hours
 
 # project memory:
 chf --brief                        # free factual brief (timeline + files)

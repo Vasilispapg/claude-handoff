@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.18.0 — 2026-08-26
 
 - **Curate what feeds the memory — `--exclude` and `--keep`**:
   `--brief --exclude ID[,ID…]` leaves sessions out of the brief entirely

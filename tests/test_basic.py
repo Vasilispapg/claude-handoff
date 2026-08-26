@@ -17,6 +17,7 @@ FIXTURE = ROOT / "tests" / "fixtures" / "classic_session.jsonl"
 TRIVIAL = ROOT / "tests" / "fixtures" / "trivial_session.jsonl"
 AGENT_SESSION = ROOT / "tests" / "fixtures" / "agent_session.jsonl"
 SECRET = ROOT / "tests" / "fixtures" / "secret_session.jsonl"
+NOTIF = ROOT / "tests" / "fixtures" / "notification_session.jsonl"
 
 
 class ParseTests(unittest.TestCase):
@@ -31,7 +32,7 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(m["git_branch"], "main")
         self.assertIn("claude-sonnet-4-5", m["models"])
         self.assertEqual(m["n_user"], 2)        # meta + tool_result msgs excluded
-        self.assertEqual(m["n_assistant"], 4)   # text-bearing records only
+        self.assertEqual(m["n_assistant"], 2)   # merged turns, not API records
         self.assertEqual(m["summaries"], ["Fix login bug in auth.py"])
 
     def test_noise_filtered(self):
@@ -493,7 +494,7 @@ class FitTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             doc = ch.build_document(parsed, FIXTURE, args)
         self.assertLess(len(doc), 12_000)         # ≈2k tokens, not 50k chars
-        self.assertIn("omitted", doc)
+        self.assertIn("…", doc)                   # digest cut is visible
 
     def test_fit_conflicts_with_llm_and_max_chars(self):
         for extra in (["--llm", "claude"], ["--max-chars", "9000"]):
@@ -889,13 +890,17 @@ class JsonFormatTests(unittest.TestCase):
 
 
 class TokenStatsTests(unittest.TestCase):
-    def test_usage_summed_and_rendered(self):
+    def test_usage_split_and_rendered(self):
         parsed = ch.parse_session(COMPACTED)   # assistant record has usage
-        self.assertEqual(parsed["meta"]["tok_in"], 1200)
+        self.assertEqual(parsed["meta"]["tok_in"], 1050)   # fresh + cache write
+        self.assertEqual(parsed["meta"]["tok_cache_read"], 150)
         self.assertEqual(parsed["meta"]["tok_out"], 45)
         doc = ch.build_deterministic(parsed, COMPACTED,
                                      include_tools=False, max_chars=80_000)
         self.assertIn("**Tokens:**", doc)
+        self.assertIn("1,050 in", doc)
+        self.assertIn("cached reads", doc)     # re-read cache split out
+        self.assertNotIn("1,200", doc)
 
     def test_no_usage_no_line(self):
         parsed = ch.parse_session(FIXTURE)     # fixture has no usage fields
@@ -2208,6 +2213,200 @@ class HelperTests(unittest.TestCase):
                              {"type": "text", "text": "b"}]}),
             "a\nb")
         self.assertEqual(ch.tool_result_text({"content": None}), "")
+
+
+class DigestTranscriptTests(unittest.TestCase):
+    """Default transcript is a condensed digest (it's a summarize tool);
+    verbatim turns live behind --full. LLM inputs always stay full."""
+
+    def _long_parsed(self):
+        parsed = ch.parse_session(FIXTURE)
+        parsed["turns"].append({
+            "role": "assistant",
+            "text_parts": ["OUTCOME lead sentence. " + "x" * 3000
+                           + " FINALWORD"],
+            "tools": [], "ts": None})
+        return parsed
+
+    def test_digest_is_default(self):
+        doc = ch.build_deterministic(self._long_parsed(), FIXTURE,
+                                     include_tools=False, max_chars=80_000)
+        self.assertNotIn("### 🧑 User", doc)       # no verbatim headers
+        self.assertIn("**🧑 User:**", doc)         # bullet digest instead
+        self.assertIn("OUTCOME lead sentence.", doc)
+        self.assertNotIn("FINALWORD", doc)         # the bulk is cut
+        self.assertIn("…", doc)                    # cut visibly, not silently
+        self.assertIn("--full", doc)               # notice names the escape hatch
+
+    def test_full_restores_verbatim(self):
+        doc = ch.build_deterministic(self._long_parsed(), FIXTURE,
+                                     include_tools=False, max_chars=80_000,
+                                     full=True)
+        self.assertIn("### 🧑 User", doc)
+        self.assertIn("FINALWORD", doc)
+        self.assertNotIn("Condensed digest", doc)
+
+    def test_cli_full_flag(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "h.md"
+            with contextlib.redirect_stderr(io.StringIO()):
+                ch.main([str(FIXTURE), "--full", "-o", str(out)])
+            self.assertIn("### 🧑 User", out.read_text(encoding="utf-8"))
+
+    def test_llm_input_stays_full(self):
+        import contextlib
+        import io
+        captured = {}
+
+        def fake_call(key, model, prompt):
+            captured["prompt"] = prompt
+            return "summary text"
+
+        with unittest.mock.patch.dict(ch.PROVIDERS["openai"],
+                                      {"call": fake_call}), \
+                unittest.mock.patch.dict(ch.os.environ,
+                                         {"OPENAI_API_KEY": "sk-test"}), \
+                contextlib.redirect_stderr(io.StringIO()):
+            doc = ch.build_llm(self._long_parsed(), FIXTURE, "openai", None,
+                               True, 80_000, use_cache=False)
+        self.assertIn("FINALWORD", captured["prompt"])   # summarizer sees all
+        self.assertIn("FINALWORD", doc)                  # --with-transcript too
+
+
+class NotificationTurnTests(unittest.TestCase):
+    """Machine task-notifications are not the human speaking."""
+
+    def test_notification_role_not_counted_as_user(self):
+        parsed = ch.parse_session(NOTIF)
+        roles = [t["role"] for t in parsed["turns"]]
+        self.assertEqual(roles,
+                         ["user", "assistant", "notification", "assistant"])
+        self.assertEqual(parsed["meta"]["n_user"], 1)
+        self.assertEqual(parsed["meta"]["n_notifications"], 1)
+
+    def test_notification_renders_one_line_unescaped(self):
+        parsed = ch.parse_session(NOTIF)
+        doc = ch.build_deterministic(parsed, NOTIF, include_tools=False,
+                                     max_chars=80_000)
+        self.assertEqual(doc.count("🧑 User"), 1)
+        self.assertIn("🔔", doc)
+        self.assertIn('Agent "Review" finished && exited', doc)  # unescaped
+        self.assertNotIn("big payload", doc)          # payload dropped
+        self.assertIn("1 background notification", doc)   # header counts them
+
+    def test_wrapped_caveat_tag_stripped(self):
+        raw = ("<local-command-caveat>Caveat: The messages below were "
+               "generated by the user while running local commands. DO NOT "
+               "respond to these messages.</local-command-caveat>\n"
+               "<command-name>/compact</command-name>ok run it")
+        self.assertEqual(ch.clean_text(raw), "ok run it")
+
+
+class StatAccuracyTests(unittest.TestCase):
+    """Header numbers a careful reader can trust."""
+
+    def test_subagent_tool_calls_counted_separately(self):
+        parsed = ch.parse_session(AGENT_SESSION)
+        self.assertEqual(parsed["meta"]["n_agent_tools"], 4)
+        doc = ch.build_deterministic(parsed, AGENT_SESSION,
+                                     include_tools=False, max_chars=80_000)
+        self.assertIn("(+4 in subagents)", doc)
+
+    def test_detached_head_not_shown_as_branch_name(self):
+        parsed = ch.parse_session(FIXTURE)
+        parsed["meta"]["git_branch"] = "HEAD"
+        header = ch.render_header(parsed, FIXTURE)
+        self.assertIn("detached HEAD", header)
+        self.assertNotIn("branch `HEAD`", header)
+
+    def test_agent_sessions_never_trivial(self):
+        # turn-counting shrank n_assistant; a session that dispatched
+        # subagents must not fall under the triviality threshold
+        self.assertFalse(ch.looks_trivial(ch.parse_session(AGENT_SESSION)))
+        self.assertTrue(ch.looks_trivial(ch.parse_session(TRIVIAL)))
+
+
+class FilesSectionTests(unittest.TestCase):
+    """The file inventory must not eat the reader's context."""
+
+    def _parsed(self):
+        parsed = ch.parse_session(FIXTURE)
+        fw = {f"/home/u/p/src/file{i:02}.py": i + 1 for i in range(50)}
+        fw["/private/tmp/claude-501/x/scratchpad/tmp1.py"] = 9
+        fw["/tmp/scratch2.js"] = 3
+        parsed["files_written"] = fw
+        return parsed
+
+    def test_sorted_by_edits_and_capped(self):
+        out = ch.render_activity(self._parsed())
+        files_part = out.split("## Commands run")[0]
+        lines = [ln for ln in files_part.splitlines()
+                 if ln.startswith("- `")]
+        self.assertEqual(len(lines), 40)              # capped
+        self.assertIn("file49.py", lines[0])          # most-edited first
+        self.assertIn("top 40 of 50", out)
+        self.assertIn("--format json", out)           # where the rest lives
+
+    def test_scratch_files_grouped_not_listed(self):
+        out = ch.render_activity(self._parsed())
+        self.assertNotIn("scratchpad/tmp1.py", out)
+        self.assertNotIn("/tmp/scratch2.js", out)
+        self.assertIn("2 scratchpad/temp file", out)
+
+    def test_small_sessions_unchanged(self):
+        out = ch.render_activity(ch.parse_session(FIXTURE))
+        self.assertIn("auth.py", out)
+        self.assertNotIn("top ", out)
+
+
+class EmailNoticeTests(unittest.TestCase):
+    """Egress heads-up: emails in the output suggest --anonymize."""
+
+    def _run(self, *extra):
+        import contextlib
+        import io
+        import tempfile
+        recs = [
+            {"type": "user", "sessionId": "e1", "cwd": "/home/u/p",
+             "timestamp": "2026-08-24T10:00:00.000Z",
+             "message": {"role": "user",
+                         "content": "στειλε update στο vasilis@example.com"}},
+            {"type": "assistant", "sessionId": "e1",
+             "timestamp": "2026-08-24T10:00:05.000Z",
+             "message": {"model": "m1", "role": "assistant",
+                         "content": [{"type": "text", "text": "Το γράφω."}]}},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "e1.jsonl"
+            p.write_text("\n".join(json.dumps(r) for r in recs),
+                         encoding="utf-8")
+            out = Path(td) / "h.md"
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                ch.main([str(p), "-o", str(out), *extra])
+        return buf.getvalue()
+
+    def test_email_in_output_hints_anonymize(self):
+        err = self._run()
+        self.assertIn("--anonymize", err)
+        self.assertIn("1 email", err)
+
+    def test_anonymize_silences_the_hint(self):
+        self.assertNotIn("1 email", self._run("--anonymize"))
+
+    def test_no_email_no_hint(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "h.md"
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                ch.main([str(FIXTURE), "-o", str(out)])
+        self.assertNotIn("--anonymize", buf.getvalue())
 
 
 if __name__ == "__main__":

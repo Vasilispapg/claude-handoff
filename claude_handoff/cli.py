@@ -42,7 +42,7 @@ from .integrations import (
 )
 from .llm import CACHE_DIR, PROVIDERS, build_llm, llm_summarize
 from .parse import looks_trivial, merge_parsed, parse_session, slice_turns
-from .redact import anonymize_text, redact_doc, redact_secrets
+from .redact import anonymize_text, count_emails, redact_doc, redact_secrets
 from .render import (
     DEFAULT_MAX_CHARS,
     build_deterministic,
@@ -127,6 +127,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "of every project (default when outside a project)")
     ap.add_argument("-o", "--output", default="handoff.md",
                     help="output file, or '-' for stdout (default: handoff.md)")
+    ap.add_argument("--full", action="store_true",
+                    help="verbatim conversation turns (classic transcript) "
+                         "instead of the default condensed digest")
     ap.add_argument("--include-tools", action="store_true",
                     help="include collapsed per-tool-call detail in transcript")
     ap.add_argument("--include-sidechains", action="store_true",
@@ -284,7 +287,7 @@ def build_document(parsed: dict, source: Path,
         if args.llm:
             outbound = (render_activity(parsed) + "\n\n"
                         + render_transcript(parsed, include_tools=True,
-                                            max_chars=10**9))
+                                            max_chars=10**9, full=True))
             if not args.no_redact:
                 outbound, n_red = redact_secrets(outbound)
                 if n_red:
@@ -304,7 +307,8 @@ def build_document(parsed: dict, source: Path,
             max_chars = _fit_transcript_cap(parsed, source, args, args.fit)
         doc = build_deterministic(parsed, source, args.include_tools,
                                   max_chars,
-                                  include_sidechains=args.include_sidechains)
+                                  include_sidechains=args.include_sidechains,
+                                  full=getattr(args, "full", False))
     if not args.no_redact:
         doc = redact_doc(doc)
     if getattr(args, "anonymize", False):
@@ -316,6 +320,14 @@ def build_document(parsed: dict, source: Path,
 
 
 def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
+    # Egress heads-up, not censorship: emails pass default redaction (it
+    # targets secrets), so name them before the doc gets pasted somewhere.
+    if not getattr(args, "anonymize", False):
+        n_mail = count_emails(doc)
+        if n_mail:
+            print(f"ℹ {n_mail} email address(es) in the output — "
+                  f"--anonymize strips identity for public sharing.",
+                  file=sys.stderr)
     tok = f"≈{_fmt_tokens(len(doc) // 4)} tokens"
     if getattr(args, "fit", None):
         tok += f" (target {_fmt_tokens(args.fit)})"
@@ -340,7 +352,7 @@ def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
 
 _CONFIG_KEYS = {"llm", "model", "fit", "output", "include_tools",
                 "include_sidechains", "max_chars", "anonymize",
-                "focus"}
+                "focus", "full"}
 
 
 def _config_path() -> Path:

@@ -193,7 +193,7 @@ session, and hooks never trigger LLM calls or create files on their own.
 ## Session
 - Project: /home/you/myapp (branch main)
 - When: 2026-08-20 09:00 → 09:04
-- Activity: 2 user messages, 4 assistant replies, 4 tool calls
+- Activity: 2 user messages, 2 assistant replies, 4 tool calls
 
 ## Files created / modified
 - /home/you/myapp/auth.py
@@ -204,11 +204,17 @@ session, and hooks never trigger LLM calls or create files on their own.
 _🤖 2 subagent(s) contributed to the work above (--include-sidechains for their transcripts)._
 
 ## Conversation
-### 🧑 User
-the login breaks on unicode passwords…
-### 🤖 Assistant
-Found it — ascii encoding. Changed to utf-8, tests pass.
+
+_Condensed digest, every turn capped — verbatim messages with --full, a real summary with --llm._
+
+- **🧑 User:** the login breaks on unicode passwords…
+- **🤖 Assistant:** Found it — ascii encoding. Changed to utf-8, tests pass. _[4 tool calls]_
+- 🔔 Agent "Update the docs" finished
 ```
+
+Every turn is there, condensed to its lead — it's a summarize tool, not
+an exporter. `--full` switches to classic verbatim messages, and `--llm`
+replaces the digest with a real summary that read *everything*.
 
 ## Common commands
 
@@ -225,6 +231,7 @@ chf a.jsonl b.jsonl                # several paths → ONE merged handoff
 chf --project myrepo               # latest session of a specific project
 chf path/to/session.jsonl -o -     # explicit file → stdout
 chf -o clipboard                   # straight to the clipboard — go paste it
+chf --full                         # verbatim messages instead of the digest
 chf --last 5                       # only the last 5 user turns
 chf --since 2h                     # only the last 2 hours of the session
 chf --fit 32k                      # sized to fit a 32k-token context
@@ -398,6 +405,7 @@ Set `PYTHONUTF8=1` (the CI runs the whole suite that way).
 | `--format md\|json` | markdown (default) or machine-readable JSON — also applies to `--list` |
 | `-o FILE` / `-o -` / `-o clipboard` | output file / stdout / clipboard (default `handoff.md`) |
 | `--fit TOKENS` | size the deterministic handoff to a token budget (`32k`, `128k`, `1m`) by tightening transcript truncation |
+| `--full` | verbatim conversation turns (classic transcript) instead of the default condensed digest |
 | `--max-chars N` | cap the transcript section (default 80 000; keeps start + recent end) |
 | `--include-tools` | collapsed `<details>` blocks with each tool call |
 | `--include-sidechains` | append full subagent transcripts (inline sidechains and `<session-id>/subagents/agent-*.jsonl`); their file/command activity is always counted |

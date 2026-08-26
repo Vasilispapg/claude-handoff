@@ -1,6 +1,7 @@
 """JSONL session parsing: records -> turns/meta/activity/sidechains."""
 from __future__ import annotations
 
+import html
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -72,7 +73,8 @@ def _new_parse_state() -> dict:
             "session_id": None, "cwd": None, "git_branch": None,
             "version": None, "models": set(), "first_ts": None,
             "last_ts": None, "n_user": 0, "n_assistant": 0, "n_tools": 0,
-            "n_agents": 0, "tok_in": 0, "tok_out": 0, "summaries": [],
+            "n_agents": 0, "n_agent_tools": 0, "n_notifications": 0,
+            "tok_in": 0, "tok_cache_read": 0, "tok_out": 0, "summaries": [],
         },
         "turns": [],            # {"role", "text_parts", "tools", "ts"}
         "files_written": {},    # path -> edit count
@@ -147,10 +149,13 @@ def _handle_assistant_record(rec: dict, state: dict) -> None:
     usage = message.get("usage")
     if isinstance(usage, dict):
         try:
+            # cache re-reads are counted separately — summed into tok_in
+            # they inflate a long session into a meaningless billions figure
             state["meta"]["tok_in"] += (
                 int(usage.get("input_tokens") or 0)
-                + int(usage.get("cache_read_input_tokens") or 0)
                 + int(usage.get("cache_creation_input_tokens") or 0))
+            state["meta"]["tok_cache_read"] += int(
+                usage.get("cache_read_input_tokens") or 0)
             state["meta"]["tok_out"] += int(usage.get("output_tokens") or 0)
         except (TypeError, ValueError):
             pass
@@ -159,19 +164,43 @@ def _handle_assistant_record(rec: dict, state: dict) -> None:
         return
     turn = _current_assistant_turn(state)
     turn.setdefault("ts", rec.get("timestamp"))
-    added_text = False
     for block in content:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
         if btype == "text" and block.get("text", "").strip():
             turn["text_parts"].append(block["text"].strip())
-            added_text = True
         elif btype == "tool_use":
-            added_text = _handle_tool_use(block, turn, state) or added_text
+            _handle_tool_use(block, turn, state)
         # thinking blocks are deliberately dropped
-    if added_text:
-        state["meta"]["n_assistant"] += 1
+    # n_assistant is derived from merged turns at the end of parse_session —
+    # counting records here triple-counts what the reader sees as one reply
+
+
+NOTIF_LINE_CAP = 160
+_NOTIF_RE = re.compile(r"<task-notification>(.*?)</task-notification>\s*",
+                       re.DOTALL)
+_NOTIF_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+_NOTIF_TYPE_RE = re.compile(r"<task-type>(.*?)</task-type>", re.DOTALL)
+
+
+def _notification_lines(text: str) -> tuple[list[str], str]:
+    """One digest line per <task-notification> block + the leftover text.
+
+    Notifications arrive as user-role records but are machine messages —
+    the payload is bulky and re-derivable (same rule as tool results), so
+    only the <summary> survives, entities unescaped."""
+    blocks = _NOTIF_RE.findall(text)
+    if blocks:
+        remainder = _NOTIF_RE.sub("", text).strip()
+    else:                       # unclosed/truncated block — take it whole
+        blocks, remainder = [text], ""
+    lines = []
+    for body in blocks:
+        m = _NOTIF_SUMMARY_RE.search(body) or _NOTIF_TYPE_RE.search(body)
+        lines.append(one_line(html.unescape(m.group(1)) if m
+                              else "background task update", NOTIF_LINE_CAP))
+    return lines, remainder
 
 
 def _handle_user_record(rec: dict, state: dict) -> None:
@@ -208,6 +237,17 @@ def _handle_user_record(rec: dict, state: dict) -> None:
     text = clean_text(user_text(message))
     if not text:
         return
+    # Background task-notifications are user-role records but not the human
+    # speaking — a separate role keeps them out of the user count.
+    if text.startswith("<task-notification>"):
+        notes, text = _notification_lines(text)
+        for line in notes:
+            state["meta"]["n_notifications"] += 1
+            state["turns"].append({"role": "notification",
+                                   "text_parts": [line], "tools": [],
+                                   "ts": rec.get("timestamp")})
+        if not text:
+            return
     # /compact leaves its machine-written history summary as a "user"
     # record — keep the content, but label it and don't count it as human.
     if rec.get("isCompactSummary") or text.startswith(
@@ -292,6 +332,7 @@ def _parse_agent_files(session_path: Path, state: dict) -> None:
                 state[key][f] = state[key].get(f, 0) + n
         state["commands"].extend(sub["commands"])
         state["meta"]["n_agents"] += 1
+        state["meta"]["n_agent_tools"] += sub["meta"]["n_tools"]
         agent_id = fp.stem.removeprefix("agent-")
         groups.append({"prompt": one_line(prompt, 120) if prompt else None,
                        "texts": texts, "agent_id": agent_id,
@@ -323,6 +364,9 @@ def parse_session(path: Path) -> dict:
     # drop empty turns (e.g. assistant records that carried only thinking)
     state["turns"] = [t for t in state["turns"]
                       if t["text_parts"] or t["tools"]]
+    # replies as the reader sees them: merged turns, not API records
+    state["meta"]["n_assistant"] = sum(
+        1 for t in state["turns"] if t["role"] == "assistant")
     for key in [k for k in state if k.startswith("_")]:
         state.pop(key)
     return state
@@ -400,7 +444,8 @@ def merge_parsed(parsed_list: list[dict]) -> dict:
         m["first_ts"] = m["first_ts"] or pm["first_ts"]
         m["last_ts"] = pm["last_ts"] or m["last_ts"]
         for key in ("n_user", "n_assistant", "n_tools", "n_agents",
-                    "tok_in", "tok_out"):
+                    "n_agent_tools", "n_notifications",
+                    "tok_in", "tok_cache_read", "tok_out"):
             m[key] += pm.get(key, 0)
         m["summaries"].extend(pm["summaries"])
         label = (pm["summaries"][-1] if pm["summaries"]
@@ -427,7 +472,9 @@ def looks_trivial(parsed: dict) -> bool:
     shell command into. Auto-selection skips these; explicit choices don't.
     """
     meta = parsed["meta"]
-    if meta["n_user"] + meta["n_assistant"] > 2:
+    # a session that dispatched subagents did real work by definition,
+    # however short its main lane reads
+    if meta["n_user"] + meta["n_assistant"] > 2 or meta["n_agents"]:
         return False
     chars = sum(len(part) for turn in parsed["turns"]
                 for part in turn["text_parts"])

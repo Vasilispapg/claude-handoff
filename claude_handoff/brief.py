@@ -264,7 +264,7 @@ def _session_note(parsed: dict, provider: str, model: str | None,
     what actually changed."""
     transcript = (render_activity(parsed) + "\n\n"
                   + render_transcript(parsed, include_tools=True,
-                                      max_chars=10**9))
+                                      max_chars=10**9, full=True))
     if redact:
         transcript, _ = redact_secrets(transcript)
     sid = _sid(parsed)

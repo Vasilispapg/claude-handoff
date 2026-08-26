@@ -54,8 +54,12 @@ Noise conventions discovered:
 
 - `<system-reminder>…</system-reminder>` injected into user messages.
 - Slash-command envelopes: `<command-name>`, `<command-message>`,
-  `<command-args>`, `<local-command-stdout>`, `<local-command-stderr>`.
+  `<command-args>`, `<local-command-stdout>`, `<local-command-stderr>`,
+  `<local-command-caveat>`.
 - `Caveat: The messages below were generated…` preamble on meta messages.
+- `<task-notification>` blocks — background-task completions delivered as
+  user-role records; the `<summary>` tag is the only human-relevant part
+  (Claude Code HTML-escapes the payload it embeds, so unescape it).
 - `isMeta: true` user records (not real human input).
 - `isSidechain: true` records — subagent branches.
 
@@ -104,6 +108,12 @@ fragile parsing of that result text.
 | Plain `--brief` grafts, never clobbers, v0.16.0 | The deterministic rebuild used to overwrite the stamped brief file wholesale, silently discarding the LLM-distilled section the user paid for. The graft logic (preserve distilled + re-derive freshness notes + carry the stamp) was extracted from `update_brief_skeleton` into `graft_distilled` and the CLI path reuses it when the destination is the stamped brief file. An explicit `-o` elsewhere stays a plain skeleton — exporting a clean copy remains possible, losing paid work does not. |
 | Freshness notes carry the delta, not a count, unreleased | Live failure (2026-08-26): a fresh session read "3 commit(s) landed after this distillation — may lag", still trusted the distilled open threads, and recommended work the repo had already shipped. Counts warn; deltas inform. The graft notes now list the undistilled sessions (date + id + title) and the commits since distillation (sha + subject), capped at `STALE_LIST_CAP=6` newest with an "earlier omitted" bullet — head+tail convention, newest is the informative end. The SessionStart injection separately lists commits newer than the file's own `built` stamp: those appear in no note on disk, so the hook is the only place that can surface them. Everything stays deterministic — reflog-read only, no LLM, hooks stay inert. |
 | `Fixed` category defined in every distill prompt, unreleased | Non-fixes (README badges, releases, listings) kept landing under `## Fixed` — the prompts named the heading but never defined it, so the model guessed. All four note prompts now pin the same rule: only defects actually diagnosed and resolved; releases/version bumps/docs/badges/listings/promotion file under Decisions or Open threads. Pinned by `BriefCategoryTests` (contiguous phrases — mind the line wrap). Prompt text is part of the note cache key, so stale notes self-invalidate; no CACHE_VERSION bump needed. |
+| Digest transcript by default, `--full` for verbatim, unreleased | Dogfooding a 270 MB / 13-day session showed verbatim head+tail keeping ~6% of turns while dumping raw recent messages — the user's verdict: "it's a summarize tool". The default now renders one capped bullet per turn (user 300 / assistant 500 / compact 800 chars, `one_line` head-only — the lead carries the outcome), lifting coverage to ~43% with head+tail as overflow fallback. A notice under `## Conversation` names both escape hatches. LLM consumption points (`build_llm`, brief notes, json+llm outbound, `--with-transcript`) pass `full=True` explicitly — the summarizer must never read a digest. |
+| Notification role, unreleased | `<task-notification>` records arrive as user-role JSONL but are machine messages; rendering them as 🧑 misattributes words to the human and inflated one real session from 94 to "333 user messages". They become `notification` turns — `<summary>` only (entities unescaped, payload dropped, same rule as tool results), counted separately in the header. Detection is `startswith` after `clean_text`, so a human *pasting* a notification stays a user turn. `<local-command-caveat>` joined `NOISE_RE`. |
+| File inventory ranked + capped at 40, unreleased | That session listed 546 files alphabetically (~35 kB) while the transcript budget starved — the least informative section ate the context. Now: sorted by edit count desc, top `FILES_CAP=40`, `…plus N scratchpad/temp file(s)` folds tempdir paths, and the cap line points at `--format json` for the full list (no silent caps). |
+| Token line splits cache re-reads, unreleased | `tok_in` summed input+cache_read+cache_creation → "3,934,092,604 in (incl. cache)", a number that reads as cost and informs nobody. `tok_in` is now fresh input (+cache writes), `tok_cache_read` renders as `(+N cached reads)`. |
+| Header stats count what the reader sees, unreleased | `n_assistant` is derived from merged turns after parsing (records overcounted ~3×); subagent tool calls surface as `(+N in subagents)` — previously the command list could exceed the "tool calls" figure, which read as impossible; `gitBranch: "HEAD"` renders as `(detached HEAD)`. `looks_trivial` gained an `n_agents` guard: turn-counting shrank the threshold sum, and a session that dispatched subagents must never be auto-skipped (a brief silently lost one before the guard). |
+| Email egress heads-up, unreleased | Default redaction targets secrets, not identity — an Apple ID in a terminal paste sails through, correctly. The CLI now counts distinct emails in the final document and prints one ℹ stderr line naming `--anonymize`. Informational only, CLI-only (hooks stay quiet), never a rewrite. |
 | Injection defense + PreCompact hooks, v0.14.0 | Transcripts embed untrusted external text (tool results, pasted docs); the LLM consumption points (SUMMARY/CHUNK/NOTE/BRIEF prompts), the handoff preamble, and the brief injection wrapper now all frame it as data-not-instructions, pinned by tests — a mitigation, not a proof. Both hook installers also register PreCompact (matcher manual\|auto): a handoff snapshot before compaction squeezes detail away, and a free brief-skeleton refresh mid-session. CHUNK_PROMPT changed → CACHE_VERSION bumped to 2. |
 | Picker multi-select, v0.12.0 | `-i` accepts `1,3` / `2-4` (`_parse_pick`) and merges the picked sessions through the same machinery as `--merge` — composition over new code paths. |
 
@@ -137,9 +147,11 @@ for curl installs — in pipeline order:
    and mid-run parent steering messages interleave into `texts` as
    "🧭 Parent: …" lines (v0.10.0).
 3. **Rendering** — `render_header` (preamble + session facts),
-   `render_activity` (files created/modified with edit counts, deduped
-   command list), `render_transcript` (🧑/🤖 turns; tools collapsed into
-   `<details>` with `--include-tools`, else a `[N tool calls]` marker),
+   `render_activity` (files ranked by edit count, capped at 40, temp
+   files folded; deduped command list), `render_transcript` (default: a
+   condensed per-turn digest — 🧑/🤖 bullets, 🔔 notification one-liners;
+   `--full` for classic verbatim turns; tools collapsed into `<details>`
+   with `--include-tools`, else a `[N tool calls]` marker),
    `render_footer`.
 4. **LLM mode** — `build_llm()` redacts secrets (`redact_secrets`), then
    feeds activity + full cleaned transcript to `llm_summarize()` with a
@@ -189,7 +201,9 @@ unaffected.
 
 **Inflated reply count.** `n_assistant` incremented whenever the current
 turn had *any* accumulated text, so every tool-only record after the first
-text bumped the counter. Fixed with a per-record `added_text` flag.
+text bumped the counter. First fixed with a per-record `added_text` flag —
+still ~3× what a reader sees (one visual reply = many text-bearing API
+records). Final form: derived from merged turns after parsing.
 
 ## 6. Testing
 
@@ -200,6 +214,9 @@ text bumped the counter. Fixed with a per-record `added_text` flag.
   caveat message, slash-command envelope, string-content tool results,
   a sidechain record, Greek text. Verifies filtering, turn merging,
   file/command extraction, `<details>` rendering.
+  `notification_session.jsonl` adds a `<task-notification>` record — it
+  also runs in `build_single.py --check`, pinning the stitched artifact's
+  `import html` (a runtime-only import no other fixture exercises).
 - **LLM path** (v0.2.0): `claude-cli` exercised end-to-end through a shim
   `claude` binary emitting the real envelope format, plus mocked-subprocess
   unit tests (envelope parsing, missing binary, nonzero exit, is_error

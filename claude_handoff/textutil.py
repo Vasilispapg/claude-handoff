@@ -13,7 +13,8 @@ NOISE_RE = re.compile(
     r"|<command-message>.*?</command-message>"
     r"|<command-args>.*?</command-args>"
     r"|<local-command-stdout>.*?</local-command-stdout>"
-    r"|<local-command-stderr>.*?</local-command-stderr>",
+    r"|<local-command-stderr>.*?</local-command-stderr>"
+    r"|<local-command-caveat>.*?</local-command-caveat>",
     re.DOTALL,
 )
 CAVEAT_RE = re.compile(r"^Caveat: The messages below were generated.*?$", re.MULTILINE)

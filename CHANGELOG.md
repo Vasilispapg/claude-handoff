@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **The transcript is a digest by default**: the `## Conversation`
+  section now renders one condensed bullet per turn (user ~300 chars,
+  assistant ~500, every cut visible as `…`) instead of near-verbatim
+  messages — it's a summarize tool. On a real 270 MB, 13-day session
+  the conversation coverage went from ~6% of turns (verbatim head+tail)
+  to ~43%, and the tail still ends at the current state. `--full`
+  restores the classic verbatim transcript; LLM summarization
+  (`--llm`, `--brief`) always reads the full text, never the digest.
+- **Task-notifications are no longer "the user"**: `<task-notification>`
+  records render as one-line `🔔` turns (summary only, entities
+  unescaped, payload dropped) and are counted separately — a marathon
+  multi-agent session dropped from "333 user messages" to the 94 the
+  human actually sent, with "240 background notification(s)" named in
+  the header. `<local-command-caveat>` wrappers are stripped as noise.
+- **File inventory capped and ranked**: `## Files created / modified`
+  shows the top 40 by edit count (was: every file, alphabetically —
+  546 bullets on that same session, starving the transcript budget);
+  scratchpad/temp files fold into one `…plus N` line; the full list
+  stays available with `--format json`.
+- **Honest token line**: cache re-reads are split out —
+  `39,185,271 in / 7,722,484 out (+3,900,024,478 cached reads)`
+  instead of one meaningless 3.9-billion "in (incl. cache)" figure.
+- **Header stats a reader can trust**: assistant replies now count
+  merged turns (what the document shows), not API records (~3× fewer);
+  subagent tool calls appear as `(+N in subagents)` so the command list
+  can no longer exceed the tool-call count; `gitBranch: "HEAD"` renders
+  as `(detached HEAD)` instead of ``branch `HEAD` ``. Sessions that
+  dispatched subagents are never auto-skipped as trivial.
+- **Egress heads-up for emails**: when the written document contains
+  email addresses (default redaction targets secrets, not identity),
+  the CLI prints `ℹ N email address(es) in the output — --anonymize
+  strips identity for public sharing`. Informational only.
 - **`Fixed` means fixes**: every distill prompt now defines the
   category — only defects actually diagnosed and resolved; releases,
   version bumps, docs, badges, listings and promotion are filed under

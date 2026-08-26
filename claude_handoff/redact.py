@@ -36,6 +36,12 @@ def anonymize_text(text: str, home: Path | None = None) -> tuple[str, int]:
         n += k
     return text, n
 
+def count_emails(text: str) -> int:
+    """Distinct email addresses present — powers the egress heads-up
+    ("consider --anonymize"); informational, never a rewrite."""
+    return len(set(_EMAIL_RE.findall(text)))
+
+
 # Secret-shaped strings are stripped from transcripts before any --llm call
 # (zero-trust: session logs routinely contain keys pasted into commands).
 SECRET_RES = [

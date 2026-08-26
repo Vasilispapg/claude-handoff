@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
+import html
 import json
 import os
 import re
@@ -55,6 +56,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterator
 
 __version__ = "0.16.0"
 
@@ -69,7 +71,8 @@ NOISE_RE = re.compile(
     r"|<command-message>.*?</command-message>"
     r"|<command-args>.*?</command-args>"
     r"|<local-command-stdout>.*?</local-command-stdout>"
-    r"|<local-command-stderr>.*?</local-command-stderr>",
+    r"|<local-command-stderr>.*?</local-command-stderr>"
+    r"|<local-command-caveat>.*?</local-command-caveat>",
     re.DOTALL,
 )
 CAVEAT_RE = re.compile(r"^Caveat: The messages below were generated.*?$", re.MULTILINE)
@@ -195,6 +198,12 @@ def anonymize_text(text: str, home: Path | None = None) -> tuple[str, int]:
         n += k
     return text, n
 
+def count_emails(text: str) -> int:
+    """Distinct email addresses present — powers the egress heads-up
+    ("consider --anonymize"); informational, never a rewrite."""
+    return len(set(_EMAIL_RE.findall(text)))
+
+
 # Secret-shaped strings are stripped from transcripts before any --llm call
 # (zero-trust: session logs routinely contain keys pasted into commands).
 SECRET_RES = [
@@ -297,7 +306,8 @@ def _new_parse_state() -> dict:
             "session_id": None, "cwd": None, "git_branch": None,
             "version": None, "models": set(), "first_ts": None,
             "last_ts": None, "n_user": 0, "n_assistant": 0, "n_tools": 0,
-            "n_agents": 0, "tok_in": 0, "tok_out": 0, "summaries": [],
+            "n_agents": 0, "n_agent_tools": 0, "n_notifications": 0,
+            "tok_in": 0, "tok_cache_read": 0, "tok_out": 0, "summaries": [],
         },
         "turns": [],            # {"role", "text_parts", "tools", "ts"}
         "files_written": {},    # path -> edit count
@@ -372,10 +382,13 @@ def _handle_assistant_record(rec: dict, state: dict) -> None:
     usage = message.get("usage")
     if isinstance(usage, dict):
         try:
+            # cache re-reads are counted separately — summed into tok_in
+            # they inflate a long session into a meaningless billions figure
             state["meta"]["tok_in"] += (
                 int(usage.get("input_tokens") or 0)
-                + int(usage.get("cache_read_input_tokens") or 0)
                 + int(usage.get("cache_creation_input_tokens") or 0))
+            state["meta"]["tok_cache_read"] += int(
+                usage.get("cache_read_input_tokens") or 0)
             state["meta"]["tok_out"] += int(usage.get("output_tokens") or 0)
         except (TypeError, ValueError):
             pass
@@ -384,19 +397,43 @@ def _handle_assistant_record(rec: dict, state: dict) -> None:
         return
     turn = _current_assistant_turn(state)
     turn.setdefault("ts", rec.get("timestamp"))
-    added_text = False
     for block in content:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
         if btype == "text" and block.get("text", "").strip():
             turn["text_parts"].append(block["text"].strip())
-            added_text = True
         elif btype == "tool_use":
-            added_text = _handle_tool_use(block, turn, state) or added_text
+            _handle_tool_use(block, turn, state)
         # thinking blocks are deliberately dropped
-    if added_text:
-        state["meta"]["n_assistant"] += 1
+    # n_assistant is derived from merged turns at the end of parse_session —
+    # counting records here triple-counts what the reader sees as one reply
+
+
+NOTIF_LINE_CAP = 160
+_NOTIF_RE = re.compile(r"<task-notification>(.*?)</task-notification>\s*",
+                       re.DOTALL)
+_NOTIF_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+_NOTIF_TYPE_RE = re.compile(r"<task-type>(.*?)</task-type>", re.DOTALL)
+
+
+def _notification_lines(text: str) -> tuple[list[str], str]:
+    """One digest line per <task-notification> block + the leftover text.
+
+    Notifications arrive as user-role records but are machine messages —
+    the payload is bulky and re-derivable (same rule as tool results), so
+    only the <summary> survives, entities unescaped."""
+    blocks = _NOTIF_RE.findall(text)
+    if blocks:
+        remainder = _NOTIF_RE.sub("", text).strip()
+    else:                       # unclosed/truncated block — take it whole
+        blocks, remainder = [text], ""
+    lines = []
+    for body in blocks:
+        m = _NOTIF_SUMMARY_RE.search(body) or _NOTIF_TYPE_RE.search(body)
+        lines.append(one_line(html.unescape(m.group(1)) if m
+                              else "background task update", NOTIF_LINE_CAP))
+    return lines, remainder
 
 
 def _handle_user_record(rec: dict, state: dict) -> None:
@@ -433,6 +470,17 @@ def _handle_user_record(rec: dict, state: dict) -> None:
     text = clean_text(user_text(message))
     if not text:
         return
+    # Background task-notifications are user-role records but not the human
+    # speaking — a separate role keeps them out of the user count.
+    if text.startswith("<task-notification>"):
+        notes, text = _notification_lines(text)
+        for line in notes:
+            state["meta"]["n_notifications"] += 1
+            state["turns"].append({"role": "notification",
+                                   "text_parts": [line], "tools": [],
+                                   "ts": rec.get("timestamp")})
+        if not text:
+            return
     # /compact leaves its machine-written history summary as a "user"
     # record — keep the content, but label it and don't count it as human.
     if rec.get("isCompactSummary") or text.startswith(
@@ -517,6 +565,7 @@ def _parse_agent_files(session_path: Path, state: dict) -> None:
                 state[key][f] = state[key].get(f, 0) + n
         state["commands"].extend(sub["commands"])
         state["meta"]["n_agents"] += 1
+        state["meta"]["n_agent_tools"] += sub["meta"]["n_tools"]
         agent_id = fp.stem.removeprefix("agent-")
         groups.append({"prompt": one_line(prompt, 120) if prompt else None,
                        "texts": texts, "agent_id": agent_id,
@@ -548,6 +597,9 @@ def parse_session(path: Path) -> dict:
     # drop empty turns (e.g. assistant records that carried only thinking)
     state["turns"] = [t for t in state["turns"]
                       if t["text_parts"] or t["tools"]]
+    # replies as the reader sees them: merged turns, not API records
+    state["meta"]["n_assistant"] = sum(
+        1 for t in state["turns"] if t["role"] == "assistant")
     for key in [k for k in state if k.startswith("_")]:
         state.pop(key)
     return state
@@ -625,7 +677,8 @@ def merge_parsed(parsed_list: list[dict]) -> dict:
         m["first_ts"] = m["first_ts"] or pm["first_ts"]
         m["last_ts"] = pm["last_ts"] or m["last_ts"]
         for key in ("n_user", "n_assistant", "n_tools", "n_agents",
-                    "tok_in", "tok_out"):
+                    "n_agent_tools", "n_notifications",
+                    "tok_in", "tok_cache_read", "tok_out"):
             m[key] += pm.get(key, 0)
         m["summaries"].extend(pm["summaries"])
         label = (pm["summaries"][-1] if pm["summaries"]
@@ -652,7 +705,9 @@ def looks_trivial(parsed: dict) -> bool:
     shell command into. Auto-selection skips these; explicit choices don't.
     """
     meta = parsed["meta"]
-    if meta["n_user"] + meta["n_assistant"] > 2:
+    # a session that dispatched subagents did real work by definition,
+    # however short its main lane reads
+    if meta["n_user"] + meta["n_assistant"] > 2 or meta["n_agents"]:
         return False
     chars = sum(len(part) for turn in parsed["turns"]
                 for part in turn["text_parts"])
@@ -1133,11 +1188,19 @@ def _newest_meaningful_session(sessions: list[Path],
 #  render
 # --------------------------------------------------------------------------- #
 
-# Message-level caps (deterministic mode). Head+tail are kept when truncating.
+# Verbatim message caps (--full mode). Head+tail are kept when truncating.
 USER_MSG_CAP = 8000
 ASSISTANT_MSG_CAP = 5000
 TOOL_LINE_CAP = 200
 DEFAULT_MAX_CHARS = 80_000       # global cap on the transcript section
+# Digest caps (default mode): one condensed line per turn.
+DIGEST_USER_CAP = 300
+DIGEST_ASSISTANT_CAP = 500
+DIGEST_COMPACT_CAP = 800
+FILES_CAP = 40                   # file-inventory bullets shown at most
+_SCRATCH_PREFIXES = ("/tmp/", "/private/tmp/", "/var/folders/")
+
+
 def render_header(parsed: dict, source: Path) -> str:
     m = parsed["meta"]
     models = ", ".join(sorted(m["models"])) or "?"
@@ -1155,31 +1218,56 @@ def render_header(parsed: dict, source: Path) -> str:
         "",
     ]
     if m["cwd"]:
-        lines.append(f"- **Project:** `{m['cwd']}`" +
-                     (f" (branch `{m['git_branch']}`)" if m["git_branch"]
-                      else ""))
+        branch = m["git_branch"]
+        where = (" (detached HEAD)" if branch == "HEAD"
+                 else f" (branch `{branch}`)" if branch else "")
+        lines.append(f"- **Project:** `{m['cwd']}`{where}")
+    activity = (f"- **Activity:** {m['n_user']} user messages, "
+                f"{m['n_assistant']} assistant replies, "
+                f"{m['n_tools']} tool calls")
+    if m.get("n_agent_tools"):
+        activity += f" (+{m['n_agent_tools']} in subagents)"
+    if m.get("n_notifications"):
+        activity += f", {m['n_notifications']} background notification(s)"
     lines += [
         f"- **When:** {fmt_ts(m['first_ts'])} → {fmt_ts(m['last_ts'])}",
         f"- **Assistant model:** {models}",
-        f"- **Activity:** {m['n_user']} user messages, "
-        f"{m['n_assistant']} assistant replies, {m['n_tools']} tool calls",
+        activity,
     ]
     if m.get("tok_in") or m.get("tok_out"):
-        lines.append(f"- **Tokens:** {m['tok_in']:,} in (incl. cache) / "
-                     f"{m['tok_out']:,} out")
+        tok = f"- **Tokens:** {m['tok_in']:,} in / {m['tok_out']:,} out"
+        if m.get("tok_cache_read"):
+            tok += f" (+{m['tok_cache_read']:,} cached reads)"
+        lines.append(tok)
     lines.append(f"- **Source:** `{source}`")
     if m["summaries"]:
         lines += ["", f"**Session title:** {m['summaries'][-1]}"]
     return "\n".join(lines)
 
 
+def _is_scratch(path: str) -> bool:
+    """Temp/scratchpad files — real edits, but noise in a project inventory."""
+    p = path.replace("\\", "/")
+    return p.startswith(_SCRATCH_PREFIXES) or "/AppData/Local/Temp/" in p
+
+
 def render_activity(parsed: dict, max_commands: int = 30) -> str:
     out = []
     fw, fr, cmds = parsed["files_written"], parsed["files_read"], parsed["commands"]
     if fw:
+        # Most-edited first, capped: a 400-file inventory would eat the
+        # context budget the conversation needs. Temp files fold into one line.
+        ranked = sorted(((f, n) for f, n in fw.items() if not _is_scratch(f)),
+                        key=lambda kv: (-kv[1], kv[0]))
+        scratch = len(fw) - len(ranked)
         out += ["## Files created / modified", ""]
+        if len(ranked) > FILES_CAP:
+            out += [f"_(top {FILES_CAP} of {len(ranked)} by edit count — "
+                    f"full list with --format json)_", ""]
         out += [f"- `{f}`" + (f" ({n}× edits)" if n > 1 else "")
-                for f, n in sorted(fw.items())]
+                for f, n in ranked[:FILES_CAP]]
+        if scratch:
+            out.append(f"- _…plus {scratch} scratchpad/temp file(s)_")
         out.append("")
     if cmds:
         deduped = list(dict.fromkeys(cmds))
@@ -1201,31 +1289,64 @@ def render_activity(parsed: dict, max_commands: int = 30) -> str:
     return "\n".join(out).rstrip()
 
 
+def _tools_details(turn: dict) -> str:
+    tool_lines = "\n".join(f"- {t}" for t in turn["tools"])
+    return (f"<details><summary>{len(turn['tools'])} tool "
+            f"calls</summary>\n\n{tool_lines}\n\n</details>")
+
+
+def _digest_block(turn: dict, text: str, include_tools: bool) -> str:
+    """One condensed bullet per turn — the default, summarizing view."""
+    role = turn["role"]
+    if role == "user":
+        return f"- **🧑 User:** {one_line(text, DIGEST_USER_CAP)}"
+    if role == "notification":
+        return f"- 🔔 {text}"          # already a one-liner from the parser
+    if role == "compact":
+        return ("- **📜 Compacted history:** "
+                + one_line(text, DIGEST_COMPACT_CAP))
+    block = f"- **🤖 Assistant:** {one_line(text, DIGEST_ASSISTANT_CAP)}" \
+        if text else "- **🤖 Assistant:**"
+    if turn["tools"] and include_tools:
+        block += "\n\n" + _tools_details(turn)
+    elif turn["tools"]:
+        block += f" _[{len(turn['tools'])} tool calls]_"
+    return block
+
+
+def _verbatim_block(turn: dict, text: str, include_tools: bool) -> str | None:
+    """Classic full-message rendering (--full)."""
+    if turn["role"] == "compact":
+        return ("### 📜 Compacted history (auto-summary of the "
+                "earlier part of this session)\n\n"
+                + truncate(text, USER_MSG_CAP))
+    if turn["role"] == "user":
+        return "### 🧑 User\n\n" + truncate(text, USER_MSG_CAP)
+    if turn["role"] == "notification":
+        return f"- 🔔 {text}"          # machine noise stays a one-liner
+    parts = []
+    if text:
+        parts.append(truncate(text, ASSISTANT_MSG_CAP))
+    if include_tools and turn["tools"]:
+        parts.append(_tools_details(turn))
+    elif turn["tools"] and not text:
+        parts.append(f"_[{len(turn['tools'])} tool calls]_")
+    return "### 🤖 Assistant\n\n" + "\n\n".join(parts) if parts else None
+
+
 def render_transcript(parsed: dict, include_tools: bool,
-                      max_chars: int) -> str:
+                      max_chars: int, full: bool = False) -> str:
     blocks = []
     for turn in parsed["turns"]:
         text = "\n\n".join(turn["text_parts"]).strip()
         if turn["role"] == "session-break":
             blocks.append(f"### ⏱ {text}")
-        elif turn["role"] == "compact":
-            blocks.append("### 📜 Compacted history (auto-summary of the "
-                          "earlier part of this session)\n\n"
-                          + truncate(text, USER_MSG_CAP))
-        elif turn["role"] == "user":
-            blocks.append("### 🧑 User\n\n" + truncate(text, USER_MSG_CAP))
+        elif full:
+            block = _verbatim_block(turn, text, include_tools)
+            if block:
+                blocks.append(block)
         else:
-            parts = []
-            if text:
-                parts.append(truncate(text, ASSISTANT_MSG_CAP))
-            if include_tools and turn["tools"]:
-                tool_lines = "\n".join(f"- {t}" for t in turn["tools"])
-                parts.append(f"<details><summary>{len(turn['tools'])} tool "
-                             f"calls</summary>\n\n{tool_lines}\n\n</details>")
-            elif turn["tools"] and not text:
-                parts.append(f"_[{len(turn['tools'])} tool calls]_")
-            if parts:
-                blocks.append("### 🤖 Assistant\n\n" + "\n\n".join(parts))
+            blocks.append(_digest_block(turn, text, include_tools))
 
     if parsed.get("slice_note"):
         blocks.insert(0, f"_[{parsed['slice_note']}]_")
@@ -1238,7 +1359,11 @@ def render_transcript(parsed: dict, include_tools: bool,
                 f"omitted ({omitted} chars). The beginning sets the goal; "
                 f"what follows is the most recent state. ...]_\n\n---\n\n"
                 f"{body[-tail:]}")
-    return "## Conversation\n\n" + body
+    heading = "## Conversation"
+    if not full:
+        heading += ("\n\n_Condensed digest, every turn capped — verbatim "
+                    "messages with --full, a real summary with --llm._")
+    return heading + "\n\n" + body
 
 
 def render_sidechains(parsed: dict, max_each: int = 2000) -> str:
@@ -1292,11 +1417,12 @@ def build_json(parsed: dict, source: Path, summary: str | None) -> str:
 
 def build_deterministic(parsed: dict, source: Path, include_tools: bool,
                         max_chars: int,
-                        include_sidechains: bool = False) -> str:
+                        include_sidechains: bool = False,
+                        full: bool = False) -> str:
     sections = [
         render_header(parsed, source),
         render_activity(parsed),
-        render_transcript(parsed, include_tools, max_chars),
+        render_transcript(parsed, include_tools, max_chars, full=full),
         render_sidechains(parsed) if include_sidechains else "",
         render_footer(),
     ]
@@ -1744,7 +1870,8 @@ def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
               focus: str | None = None, redact: bool = True,
               use_cache: bool = True) -> str:
     transcript = render_transcript(parsed, include_tools=True,
-                                   max_chars=10**9)  # chunking handles size
+                                   max_chars=10**9,  # chunking handles size
+                                   full=True)        # the LLM sees everything
     activity = render_activity(parsed)
     outbound = activity + "\n\n" + transcript
     if redact:
@@ -1758,7 +1885,7 @@ def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
     sections = [render_header(parsed, source), summary.strip()]
     if with_transcript:
         sections.append(render_transcript(parsed, include_tools=False,
-                                          max_chars=max_chars))
+                                          max_chars=max_chars, full=True))
     sections.append(render_footer())
     return "\n\n".join(sections) + "\n"
 
@@ -2011,7 +2138,7 @@ def _session_note(parsed: dict, provider: str, model: str | None,
     what actually changed."""
     transcript = (render_activity(parsed) + "\n\n"
                   + render_transcript(parsed, include_tools=True,
-                                      max_chars=10**9))
+                                      max_chars=10**9, full=True))
     if redact:
         transcript, _ = redact_secrets(transcript)
     sid = _sid(parsed)
@@ -2642,6 +2769,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "of every project (default when outside a project)")
     ap.add_argument("-o", "--output", default="handoff.md",
                     help="output file, or '-' for stdout (default: handoff.md)")
+    ap.add_argument("--full", action="store_true",
+                    help="verbatim conversation turns (classic transcript) "
+                         "instead of the default condensed digest")
     ap.add_argument("--include-tools", action="store_true",
                     help="include collapsed per-tool-call detail in transcript")
     ap.add_argument("--include-sidechains", action="store_true",
@@ -2799,7 +2929,7 @@ def build_document(parsed: dict, source: Path,
         if args.llm:
             outbound = (render_activity(parsed) + "\n\n"
                         + render_transcript(parsed, include_tools=True,
-                                            max_chars=10**9))
+                                            max_chars=10**9, full=True))
             if not args.no_redact:
                 outbound, n_red = redact_secrets(outbound)
                 if n_red:
@@ -2819,7 +2949,8 @@ def build_document(parsed: dict, source: Path,
             max_chars = _fit_transcript_cap(parsed, source, args, args.fit)
         doc = build_deterministic(parsed, source, args.include_tools,
                                   max_chars,
-                                  include_sidechains=args.include_sidechains)
+                                  include_sidechains=args.include_sidechains,
+                                  full=getattr(args, "full", False))
     if not args.no_redact:
         doc = redact_doc(doc)
     if getattr(args, "anonymize", False):
@@ -2831,6 +2962,14 @@ def build_document(parsed: dict, source: Path,
 
 
 def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
+    # Egress heads-up, not censorship: emails pass default redaction (it
+    # targets secrets), so name them before the doc gets pasted somewhere.
+    if not getattr(args, "anonymize", False):
+        n_mail = count_emails(doc)
+        if n_mail:
+            print(f"ℹ {n_mail} email address(es) in the output — "
+                  f"--anonymize strips identity for public sharing.",
+                  file=sys.stderr)
     tok = f"≈{_fmt_tokens(len(doc) // 4)} tokens"
     if getattr(args, "fit", None):
         tok += f" (target {_fmt_tokens(args.fit)})"
@@ -2855,7 +2994,7 @@ def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
 
 _CONFIG_KEYS = {"llm", "model", "fit", "output", "include_tools",
                 "include_sidechains", "max_chars", "anonymize",
-                "focus"}
+                "focus", "full"}
 
 
 def _config_path() -> Path:

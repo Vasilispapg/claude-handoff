@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
+import html
 import json
 import os
 import re
@@ -40,6 +41,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterator
 """
 
 
@@ -116,6 +118,9 @@ def check(built: str) -> int:
             [str(fixtures / "secret_session.jsonl"), "-o", "-"],
             [str(fixtures / "classic_session.jsonl"), "-o", "-",
              "--fit", "1k"],
+            [str(fixtures / "classic_session.jsonl"), "-o", "-", "--full"],
+            # exercises the notification path (html import) in the artifact
+            [str(fixtures / "notification_session.jsonl"), "-o", "-"],
         ]
         for args in cases:
             pkg_out = subprocess.run(

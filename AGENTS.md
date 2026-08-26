@@ -197,8 +197,14 @@ byte-identical outputs on the fixtures and a real session, before/after
   activity summary, full texts render only with `--include-sidechains`.
 - `isMeta: true` user records and `<system-reminder>` / slash-command
   envelopes are not human input — filtered by `NOISE_RE` / `CAVEAT_RE`.
+  `<task-notification>` records become `notification` turns (🔔
+  one-liners, counted separately) — never user turns.
+- The default transcript is a per-turn digest; `--full` is the verbatim
+  mode. LLM inputs always render with `full=True` — never feed the
+  summarizer a digest.
 - Truncation is head+tail everywhere (the middle is the expendable part);
-  keep it that way.
+  keep it that way. Digest cuts are `one_line` head-only by design — the
+  per-turn lead is the summary.
 - Default LLM model ids in `PROVIDERS` rot; prefer fixing via `--model`
   docs over hardcoding bleeding-edge ids.
 - `_call_claude_cli` scrubs `CLAUDE*` env vars (except
@@ -212,6 +218,11 @@ byte-identical outputs on the fixtures and a real session, before/after
 - The single-file stitcher strips module docstrings and import headers;
   keep intra-package imports in `from .module import name` form (never
   `module.name` calls) or the generated build breaks.
+- `STDLIB_BLOCK` in `scripts/build_single.py` is a hardcoded import
+  header — a new stdlib import in any module must be added there too, or
+  the artifact crashes at runtime while `--check` stays green unless a
+  fixture exercises that path (the notification fixture exists because
+  `import html` was once missed). Add a fixture case with the import.
 - `--fit` conflicts with explicit `--llm`/`--max-chars` by design, and the
   config file can inject `fit` — error messages mention that on purpose.
 

@@ -450,7 +450,8 @@ def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
               focus: str | None = None, redact: bool = True,
               use_cache: bool = True) -> str:
     transcript = render_transcript(parsed, include_tools=True,
-                                   max_chars=10**9)  # chunking handles size
+                                   max_chars=10**9,  # chunking handles size
+                                   full=True)        # the LLM sees everything
     activity = render_activity(parsed)
     outbound = activity + "\n\n" + transcript
     if redact:
@@ -464,7 +465,7 @@ def build_llm(parsed: dict, source: Path, provider: str, model: str | None,
     sections = [render_header(parsed, source), summary.strip()]
     if with_transcript:
         sections.append(render_transcript(parsed, include_tools=False,
-                                          max_chars=max_chars))
+                                          max_chars=max_chars, full=True))
     sections.append(render_footer())
     return "\n\n".join(sections) + "\n"
 

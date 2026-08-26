@@ -66,10 +66,16 @@ Moving to a small-context model? Size it first:
 chf --fit 32k -o clipboard
 ```
 
-Truncation is head+tail — the goal (start) and the current state (end)
-survive; the noisy middle is the expendable part. For a *complete* account
-instead, ask for the LLM summary (`chf --llm claude-cli`), which
-map-reduces the whole transcript and drops nothing.
+The conversation section is a *digest* by default — one condensed bullet
+per turn (assistant replies cut to their lead, background notifications
+to a 🔔 one-liner), because a handoff is a summary, not an export. On a
+13-day monster session that multiplies how much of the conversation fits:
+~43% of turns instead of ~6% verbatim. Only when even the digest
+overflows does head+tail truncation kick in — the goal (start) and the
+current state (end) survive; the middle is the expendable part. Want the
+full messages? `chf --full`. Want a *complete* account? The LLM summary
+(`chf --llm claude-cli`) map-reduces the whole transcript and drops
+nothing.
 
 ## 14:00 — "where did we decide that?"
 
@@ -194,8 +200,9 @@ a hierarchy where nothing is more than one step away:
 ## Cheatsheet
 
 ```bash
-chf                                  # latest session → handoff.md
+chf                                  # latest session → handoff.md (digest)
 chf -o clipboard                     # …straight to the clipboard
+chf --full                           # verbatim messages, classic transcript
 chf --fit 32k -o clipboard           # sized for a smaller context window
 chf --llm claude-cli                 # real summary, nothing dropped, no API key
 chf a.jsonl b.jsonl                  # merge specific sessions into one

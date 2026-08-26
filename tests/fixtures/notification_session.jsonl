@@ -1,0 +1,4 @@
+{"type":"user","sessionId":"n1","cwd":"/home/u/p","gitBranch":"main","timestamp":"2026-08-24T10:00:00.000Z","message":{"role":"user","content":"τρεξε τα tests"}}
+{"type":"assistant","sessionId":"n1","timestamp":"2026-08-24T10:00:05.000Z","message":{"model":"m1","role":"assistant","content":[{"type":"text","text":"Τρέχω."}]}}
+{"type":"user","sessionId":"n1","timestamp":"2026-08-24T10:01:00.000Z","message":{"role":"user","content":"<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n<summary>Agent &quot;Review&quot; finished &amp;&amp; exited</summary>\n<result>big payload that must not survive</result>\n</task-notification>"}}
+{"type":"assistant","sessionId":"n1","timestamp":"2026-08-24T10:01:10.000Z","message":{"model":"m1","role":"assistant","content":[{"type":"text","text":"Πέρασαν."}]}}

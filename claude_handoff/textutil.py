@@ -1,7 +1,9 @@
 """Text helpers: cleaning, truncation, tiny formatters."""
 from __future__ import annotations
 
+import os
 import re
+import sys
 from datetime import datetime
 
 NOISE_RE = re.compile(
@@ -77,3 +79,19 @@ def fmt_ts(ts: str | None) -> str:
         return ts
 
 
+
+
+def warn(context: str, error) -> None:
+    """One-line operational warning on stderr — visible, never fatal."""
+    print(f"[claude-handoff] {context}: {error}", file=sys.stderr)
+
+
+def debug_enabled() -> bool:
+    return bool(os.environ.get("CLAUDE_HANDOFF_DEBUG"))
+
+
+def debug(context: str, error) -> None:
+    """warn(), but only under --debug / CLAUDE_HANDOFF_DEBUG=1 — for
+    failures that are tolerated by design (corrupt lines, cache misses)."""
+    if debug_enabled():
+        warn(context, error)

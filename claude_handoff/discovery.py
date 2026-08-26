@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .parse import looks_trivial, parse_session
-from .textutil import clean_text, one_line, user_text
+from .textutil import clean_text, one_line, user_text, warn
 
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "projects"
 
@@ -143,7 +143,7 @@ def _may_contain(path: Path, needle: str,
                     return True
                 tail = low[-overlap:] if overlap else b""
     except OSError:
-        return False
+        return None  # unreadable — caller counts it
 
 
 def grep_sessions(pattern: str,
@@ -155,13 +155,20 @@ def grep_sessions(pattern: str,
     needle = pattern.lower()
     prefilter = _raw_prefilter_ok(needle)
     hits = []
+    unreadable = 0
     for path in find_sessions(project_filter):
-        if prefilter and not _may_contain(path, needle):
-            continue  # raw scan is a superset test — safe to skip the parse
+        if prefilter:
+            scan = _may_contain(path, needle)
+            if scan is None:
+                unreadable += 1
+                continue
+            if not scan:
+                continue  # raw scan is a superset test — skip the parse
         try:
             parsed = parse_session(path)
         except OSError:
-            continue  # unreadable file must not kill the search
+            unreadable += 1
+            continue  # an unreadable file must not kill the search
         for turn in parsed["turns"]:
             if turn["role"] not in ("user", "assistant"):
                 continue
@@ -172,6 +179,8 @@ def grep_sessions(pattern: str,
                 preview = text[start:idx + len(needle) + 40]
                 hits.append((path, one_line(preview, 100)))
                 break
+    if unreadable:
+        warn("--grep", f"skipped {unreadable} unreadable file(s)")
     return hits
 
 

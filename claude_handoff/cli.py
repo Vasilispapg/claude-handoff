@@ -178,6 +178,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-redact", action="store_true",
                     help="keep secret-looking strings (default: redacted "
                          "from every output, LLM or not)")
+    ap.add_argument("--debug", action="store_true",
+                    help="report tolerated failures (corrupt lines, "
+                         "unreadable files) on stderr; "
+                         "CLAUDE_HANDOFF_DEBUG=1 does the same")
     ap.add_argument("--no-cache", action="store_true",
                     help="with --llm: disable the chunk-note cache "
                          f"({CACHE_DIR})")
@@ -419,6 +423,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_arg_parser()
     parser.set_defaults(**_load_config())
     args = parser.parse_args(argv)
+    if args.debug:
+        os.environ["CLAUDE_HANDOFF_DEBUG"] = "1"
     if args.fit and (args.llm or args.max_chars is not None):
         raise SystemExit("--fit sizes the deterministic output on its own — "
                          "drop --llm / --max-chars when using it "

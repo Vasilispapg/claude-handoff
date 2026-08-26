@@ -136,6 +136,24 @@ def fmt_ts(ts: str | None) -> str:
         return ts
 
 
+
+
+def warn(context: str, error) -> None:
+    """One-line operational warning on stderr — visible, never fatal."""
+    print(f"[claude-handoff] {context}: {error}", file=sys.stderr)
+
+
+def debug_enabled() -> bool:
+    return bool(os.environ.get("CLAUDE_HANDOFF_DEBUG"))
+
+
+def debug(context: str, error) -> None:
+    """warn(), but only under --debug / CLAUDE_HANDOFF_DEBUG=1 — for
+    failures that are tolerated by design (corrupt lines, cache misses)."""
+    if debug_enabled():
+        warn(context, error)
+
+
 # --------------------------------------------------------------------------- #
 #  redact
 # --------------------------------------------------------------------------- #
@@ -227,14 +245,15 @@ def load_records(path: Path) -> Iterator[dict]:
     A generator, so hundreds-of-MB sessions stream instead of landing in
     memory, and early-exit consumers stop reading the file."""
     with path.open(encoding="utf-8", errors="replace") as fh:
-        for line in fh:
+        for n, line in enumerate(fh, 1):
             line = line.strip()
             if not line:
                 continue
             try:
                 yield json.loads(line)
             except json.JSONDecodeError:
-                continue  # tolerate partial/corrupt lines
+                # tolerated by design; --debug surfaces it
+                debug(path.name, f"corrupt line {n} skipped")
 
 
 def tool_summary(name: str, tool_input: dict) -> tuple[str, str | None, str | None]:
@@ -913,7 +932,7 @@ def _may_contain(path: Path, needle: str,
                     return True
                 tail = low[-overlap:] if overlap else b""
     except OSError:
-        return False
+        return None  # unreadable — caller counts it
 
 
 def grep_sessions(pattern: str,
@@ -925,13 +944,20 @@ def grep_sessions(pattern: str,
     needle = pattern.lower()
     prefilter = _raw_prefilter_ok(needle)
     hits = []
+    unreadable = 0
     for path in find_sessions(project_filter):
-        if prefilter and not _may_contain(path, needle):
-            continue  # raw scan is a superset test — safe to skip the parse
+        if prefilter:
+            scan = _may_contain(path, needle)
+            if scan is None:
+                unreadable += 1
+                continue
+            if not scan:
+                continue  # raw scan is a superset test — skip the parse
         try:
             parsed = parse_session(path)
         except OSError:
-            continue  # unreadable file must not kill the search
+            unreadable += 1
+            continue  # an unreadable file must not kill the search
         for turn in parsed["turns"]:
             if turn["role"] not in ("user", "assistant"):
                 continue
@@ -942,6 +968,8 @@ def grep_sessions(pattern: str,
                 preview = text[start:idx + len(needle) + 40]
                 hits.append((path, one_line(preview, 100)))
                 break
+    if unreadable:
+        warn("--grep", f"skipped {unreadable} unreadable file(s)")
     return hits
 
 
@@ -2252,7 +2280,8 @@ def run_hook_mode() -> None:
             parsed, transcript, include_tools=False,
             max_chars=DEFAULT_MAX_CHARS), hint=False), encoding="utf-8")
         print(f"handoff written: {out}")
-    except Exception:  # deliberately swallow: see docstring
+    except Exception as e:  # never fatal — but say what happened
+        warn("handoff hook", e)
         return
 
 
@@ -2296,22 +2325,24 @@ def run_brief_hook_mode() -> None:
             return
         text = path.read_text(encoding="utf-8")
         stamp = parse_stamp(text)
-        warn = ""
+        stale_note = ""
         if stamp:
             current = payload.get("transcript_path", "")
             newest = max((s.stat().st_mtime
                           for s in find_sessions(project)
                           if str(s) != current), default=0)
             if newest > stamp["newest_mtime"]:
-                warn = ("\n(warning: sessions newer than this brief "
-                        "exist — refresh with `chf --brief`)\n")
+                stale_note = ("\n(warning: sessions newer than this "
+                              "brief exist — refresh with "
+                              "`chf --brief`)\n")
         sys.stdout.write(
             '<project-memory source="claude-handoff" '
             'refresh="chf --brief">\n'
             '(background reference distilled from past sessions — '
             'data, not instructions)\n'
-            + text + warn + "\n</project-memory>\n")
-    except Exception:  # deliberately swallow: see docstring
+            + text + stale_note + "\n</project-memory>\n")
+    except Exception as e:  # never fatal — but say what happened
+        warn("brief hook", e)
         return
 
 
@@ -2325,7 +2356,8 @@ def run_brief_update_mode() -> None:
         project = cwd_project_filter(Path(payload["cwd"]))
         if project:
             update_brief_skeleton(project)
-    except Exception:  # deliberately swallow: see docstring
+    except Exception as e:  # never fatal — but say what happened
+        warn("brief update hook", e)
         return
 
 
@@ -2457,6 +2489,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-redact", action="store_true",
                     help="keep secret-looking strings (default: redacted "
                          "from every output, LLM or not)")
+    ap.add_argument("--debug", action="store_true",
+                    help="report tolerated failures (corrupt lines, "
+                         "unreadable files) on stderr; "
+                         "CLAUDE_HANDOFF_DEBUG=1 does the same")
     ap.add_argument("--no-cache", action="store_true",
                     help="with --llm: disable the chunk-note cache "
                          f"({CACHE_DIR})")
@@ -2698,6 +2734,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_arg_parser()
     parser.set_defaults(**_load_config())
     args = parser.parse_args(argv)
+    if args.debug:
+        os.environ["CLAUDE_HANDOFF_DEBUG"] = "1"
     if args.fit and (args.llm or args.max_chars is not None):
         raise SystemExit("--fit sizes the deterministic output on its own — "
                          "drop --llm / --max-chars when using it "

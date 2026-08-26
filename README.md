@@ -303,6 +303,7 @@ never fatal.
 | `CLAUDE_HOME` | Claude Code home (default `~/.claude`) — where sessions, handoffs and briefs live |
 | `CLAUDE_HANDOFF_CACHE` | chunk/note cache dir (default `~/.cache/claude-handoff`) |
 | `CLAUDE_HANDOFF_CONFIG` | config file path (default `~/.config/claude-handoff/config.json`) |
+| `CLAUDE_HANDOFF_DEBUG` | `1` = same as `--debug`; also lights up the hooks (add it to the hook command or your shell env) |
 
 `claude-cli` needs no variable — it shells out to your installed
 [Claude Code](https://claude.ai/code) CLI, billed to your Pro/Max plan
@@ -357,6 +358,12 @@ That's the freshness stamp doing its job: run
 are paid for). The factual part refreshes itself if the SessionEnd hook is
 installed.
 
+**Something silently did nothing?**
+Tolerant-by-design paths (corrupt JSONL lines, unreadable files, cache
+trouble) never crash the run — add `--debug` (or `CLAUDE_HANDOFF_DEBUG=1`)
+to see exactly what was skipped and why. Hooks always report their
+errors on stderr while still exiting 0.
+
 **Garbled characters on Windows**
 Set `PYTHONUTF8=1` (the CI runs the whole suite that way).
 
@@ -391,6 +398,7 @@ Set `PYTHONUTF8=1` (the CI runs the whole suite that way).
 | `--mcp` | run as an MCP server over stdio |
 | `--allow-llm` | with `--mcp`: let the `handoff` tool run LLM summaries (explicit opt-in) |
 | `--completions bash\|zsh` | print a tab-completion snippet |
+| `--debug` | report tolerated failures (corrupt lines, unreadable files) on stderr — nothing becomes fatal |
 
 ## Roadmap
 

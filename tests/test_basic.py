@@ -1327,6 +1327,82 @@ class BriefFreshnessTests(unittest.TestCase):
             self.assertEqual(list(Path(td).iterdir()), [])
 
 
+class VisibleFailureTests(unittest.TestCase):
+    """Tolerant is not mute: swallowed errors report to stderr (never
+    fatal, exit codes and stdout untouched); CLAUDE_HANDOFF_DEBUG=1
+    surfaces the by-design-tolerant paths too."""
+
+    def test_warn_helper_prefixes_stderr(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ch.textutil.warn("brief hook", ValueError("boom"))
+        self.assertIn("[claude-handoff] brief hook: boom", buf.getvalue())
+
+    def test_hooks_report_their_error_on_stderr(self):
+        import contextlib
+        import io
+        for mode in (ch.run_hook_mode, ch.run_brief_hook_mode,
+                     ch.run_brief_update_mode):
+            out, err = io.StringIO(), io.StringIO()
+            with unittest.mock.patch.object(sys, "stdin",
+                                            io.StringIO("{broken")), \
+                    contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(err):
+                mode()                              # must not raise
+            self.assertEqual(out.getvalue(), "")    # stdout stays clean
+            self.assertIn("[claude-handoff]", err.getvalue())
+
+    def test_grep_reports_unreadable_files(self):
+        import contextlib
+        import io
+        ghost = Path("/nonexistent/ghost-session.jsonl")
+        err = io.StringIO()
+        with unittest.mock.patch.object(
+                ch.discovery, "find_sessions",
+                lambda *a, **k: [ghost, FIXTURE]), \
+                contextlib.redirect_stderr(err):
+            hits = ch.grep_sessions("unicode")
+        self.assertEqual([p for p, _ in hits], [FIXTURE])
+        self.assertIn("1 unreadable", err.getvalue())
+
+    def test_debug_surfaces_corrupt_lines(self):
+        import contextlib
+        import io
+        err = io.StringIO()
+        with unittest.mock.patch.dict(ch.os.environ,
+                                      {"CLAUDE_HANDOFF_DEBUG": "1"}), \
+                contextlib.redirect_stderr(err):
+            ch.parse_session(AGENT_SESSION)     # aaa111 has a corrupt line
+        self.assertIn("corrupt line", err.getvalue())
+
+    def test_debug_flag_enables_the_channel(self):
+        import contextlib
+        import io
+        import tempfile
+        err = io.StringIO()
+        env = dict(ch.os.environ)
+        env.pop("CLAUDE_HANDOFF_DEBUG", None)
+        with tempfile.TemporaryDirectory() as td, \
+                unittest.mock.patch.dict(ch.os.environ, env, clear=True), \
+                contextlib.redirect_stderr(err):
+            ch.main([str(AGENT_SESSION), "--debug",
+                     "-o", str(Path(td) / "h.md")])
+        self.assertIn("corrupt line", err.getvalue())
+
+    def test_silent_by_default_for_tolerant_paths(self):
+        import contextlib
+        import io
+        err = io.StringIO()
+        env = dict(ch.os.environ)
+        env.pop("CLAUDE_HANDOFF_DEBUG", None)
+        with unittest.mock.patch.dict(ch.os.environ, env, clear=True), \
+                contextlib.redirect_stderr(err):
+            ch.parse_session(AGENT_SESSION)
+        self.assertNotIn("corrupt", err.getvalue())
+
+
 class InjectionDefenseTests(unittest.TestCase):
     """Untrusted transcript content must be framed as data, never as
     instructions — at every LLM consumption point and in every output a

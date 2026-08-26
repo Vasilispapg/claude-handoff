@@ -61,9 +61,11 @@ Orientation — read in this order, only as far as your task needs:
   via `redact_doc` — a written or pasted handoff is egress too); default on,
   `--no-redact` opts out (CLI only; hook and MCP always redact, and the
   config file may never set `no_redact`).
-- **Hooks are inert by design.** They swallow every error, never call an
-  LLM, and never create files on their own — a hook must never break the
-  host session or bill the user silently.
+- **Hooks are inert, not mute.** They never raise, always exit 0, never
+  call an LLM, and never create files on their own — but every swallowed
+  error is reported on stderr (`textutil.warn`); tolerated parse/cache
+  paths report under `--debug` / `CLAUDE_HANDOFF_DEBUG=1`
+  (`textutil.debug`). Never add a bare silent `except`.
 - **Never truncate instructions.** Size caps may trim transcripts and
   chunk notes, never the prompt rules or the user's `--focus`.
 - **Cache is best-effort and content-addressed.** A cache failure must

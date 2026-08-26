@@ -11,6 +11,11 @@
   also register PreCompact — a handoff snapshot before compaction
   squeezes detail away, and a free brief-skeleton refresh
   mid-session.
+- **Tolerant, not mute**: hooks now report swallowed errors on stderr
+  (still exit 0, stdout untouched); `--grep` says how many unreadable
+  files it skipped; new `--debug` flag / `CLAUDE_HANDOFF_DEBUG=1`
+  surfaces tolerated failures (corrupt JSONL lines) with file and
+  line number.
 
 ## 0.13.0 — 2026-08-26
 

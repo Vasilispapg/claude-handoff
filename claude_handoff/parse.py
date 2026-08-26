@@ -10,6 +10,7 @@ from typing import Iterator
 from .render import TOOL_LINE_CAP
 from .textutil import (
     clean_text,
+    debug,
     fmt_ts,
     one_line,
     tool_result_text,
@@ -25,14 +26,15 @@ def load_records(path: Path) -> Iterator[dict]:
     A generator, so hundreds-of-MB sessions stream instead of landing in
     memory, and early-exit consumers stop reading the file."""
     with path.open(encoding="utf-8", errors="replace") as fh:
-        for line in fh:
+        for n, line in enumerate(fh, 1):
             line = line.strip()
             if not line:
                 continue
             try:
                 yield json.loads(line)
             except json.JSONDecodeError:
-                continue  # tolerate partial/corrupt lines
+                # tolerated by design; --debug surfaces it
+                debug(path.name, f"corrupt line {n} skipped")
 
 
 def tool_summary(name: str, tool_input: dict) -> tuple[str, str | None, str | None]:

@@ -39,7 +39,10 @@ neither you nor the model trusts stale memory silently. Same for the
 repo itself: the brief shows the current `Repo HEAD` (hash + date +
 last commit subject), and when commits landed after the last
 distillation — even ones made entirely outside Claude — the injection
-warns `N commit(s) newer than this memory landed in the repo`.
+warns `N commit(s) newer than this memory landed in the repo`. The
+warnings carry the delta itself: the freshness notes name the
+undistilled sessions (date, id, title) and list the commits (sha +
+subject), so the model sees what changed, not just how much.
 
 ## 11:30 — the session dies mid-debugging
 

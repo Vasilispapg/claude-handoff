@@ -157,8 +157,10 @@ installs two hooks: **SessionStart** injects the brief as context (Claude
 starts already knowing your project — re-injected after `/compact` too),
 **SessionEnd** auto-refreshes the factual part for free. **No LLM ever runs
 from a hook**; the distilled part refreshes only when you say so. The brief
-carries a freshness stamp, and both the file and the injection warn when
-newer sessions exist. Fully local; redaction applies as everywhere.
+carries a freshness stamp, and when newer sessions or commits exist the
+file and the injection don't just warn — they list them (session titles,
+commit subjects), so a fresh session sees *what* changed, not merely that
+something did. Fully local; redaction applies as everywhere.
 
 → Step-by-step mechanics, the honest cost table, and a full day-with-it
 walkthrough: **[docs/GUIDE.md](docs/GUIDE.md)**.

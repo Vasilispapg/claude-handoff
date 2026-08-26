@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **`Fixed` means fixes**: every distill prompt now defines the
+  category — only defects actually diagnosed and resolved; releases,
+  version bumps, docs, badges, listings and promotion are filed under
+  Decisions or Open threads instead (non-fixes like README badges were
+  landing under `## Fixed`). Prompt text is part of the note cache key,
+  so affected notes re-distill on the next `--llm` run.
+- **Freshness notes list the delta, not just a count**: "N newer
+  session(s)" now names those sessions (date, id, title) and "N
+  commit(s) landed after this distillation" lists sha + subject bullets
+  (capped at 6, newest last). The SessionStart injection additionally
+  lists commits the brief file has never seen (landed after its last
+  rebuild). A bare count once let a fresh session trust distilled open
+  threads the repo had already closed; the delta shows what changed.
+
 ## 0.16.0 — 2026-08-26
 
 - **Plain `--brief` no longer discards a paid distillation**: rebuilding

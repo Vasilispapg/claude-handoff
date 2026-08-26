@@ -419,7 +419,7 @@ def _run_brief(args: argparse.Namespace) -> None:
             old_stamp = parse_stamp(old)
             if old_stamp:
                 doc = graft_distilled(old, doc, old_stamp, label,
-                                      len(parsed_list))
+                                      parsed_list)
     if not args.no_redact:
         doc = redact_doc(doc)
     if getattr(args, "anonymize", False):

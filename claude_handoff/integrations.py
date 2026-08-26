@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ._version import __version__
 from .brief import (
+    _commit_bullets,
     _git_commits_since,
     brief_path,
     parse_stamp,
@@ -346,12 +347,17 @@ def run_brief_hook_mode() -> None:
                               "`chf --brief`)\n")
             commits = (_git_commits_since(payload["cwd"],
                                           stamp["distilled"])
-                       if stamp["distilled"] else 0)
+                       if stamp["distilled"] else [])
             if commits:
-                stale_note += (f"\n(warning: {commits} commit(s) newer "
-                               f"than this memory landed in the repo — "
-                               f"refresh with `chf --brief --llm "
+                stale_note += (f"\n(warning: {len(commits)} commit(s) "
+                               f"newer than this memory landed in the "
+                               f"repo — refresh with `chf --brief --llm "
                                f"{stamp['provider']}`)\n")
+                # the brief's own notes cover commits up to its last
+                # rebuild; anything later appears nowhere in the file,
+                # so list those subjects here
+                stale_note += _commit_bullets(
+                    [c for c in commits if c[0] > stamp["built"]])
         sys.stdout.write(
             '<project-memory source="claude-handoff" '
             'refresh="chf --brief">\n'

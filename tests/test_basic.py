@@ -1477,6 +1477,10 @@ class BriefFreshnessTests(unittest.TestCase):
         self.assertIn("Fix login bug in auth.py", text)   # fresh timeline
         self.assertIn("- Redis for drafts [abc123]", text)  # distilled kept
         self.assertIn("newer session(s) since this distillation", text)
+        # the note names the undistilled sessions, not just a count
+        self.assertRegex(text,
+                         r"newer session\(s\) since this distillation"
+                         r"[^\n]*_\n- \*\*")
         self.assertIn("claude-handoff-brief v=1", text)   # re-stamped
 
     def _fake_repo(self, td, entries):
@@ -1529,9 +1533,13 @@ class BriefFreshnessTests(unittest.TestCase):
                 .read_text(encoding="utf-8")
         # one commit (ts 2000) landed after the distillation (ts 1500)
         self.assertIn("1 commit(s) landed after this distillation", text)
-        self.assertIn("fix parser", text)
-        # refreshing twice never stacks the note
+        # …listed sha+subject, so a reader sees WHAT changed
+        self.assertIn("- `bbbbbbbb` fix parser", text)
+        # refreshing twice never stacks the note (bullets included)
         self.assertEqual(text.count("landed after this distillation"), 1)
+        self.assertEqual(text.count("- `bbbbbbbb`"), 1)
+        # …and never accumulates blank lines, graft after graft
+        self.assertNotIn("\n\n\n", text)
         self.assertIn("- Redis for drafts [abc123]", text)  # distilled kept
 
     def test_update_leaves_unknown_files_alone(self):
@@ -1553,6 +1561,29 @@ class BriefFreshnessTests(unittest.TestCase):
                                             Path(td)):
                 self.assertFalse(ch.brief.update_brief_skeleton("-none"))
             self.assertEqual(list(Path(td).iterdir()), [])
+
+
+class BriefCategoryTests(unittest.TestCase):
+    """Fixed means fixes: releases/docs/promotion must not land there,
+    and freshness deltas are listed, not just counted."""
+
+    def test_all_note_prompts_pin_the_fixed_rule(self):
+        # non-fixes (badges, releases) were landing under ## Fixed —
+        # every distill prompt must define the category
+        for prompt in (ch.brief.SESSION_NOTE_PROMPT,
+                       ch.brief.BRIEF_PROMPT,
+                       ch.brief.SESSION_CHUNK_PROMPT,
+                       ch.brief.SESSION_NOTE_REDUCE_PROMPT):
+            self.assertIn("actually diagnosed and resolved", prompt)
+            self.assertIn("are not fixes", prompt)
+
+    def test_commit_bullets_cap_head_omitted(self):
+        commits = [(i, f"{i:040x}", f"subject{i}") for i in range(10)]
+        out = ch.brief._commit_bullets(commits)
+        self.assertIn("4 earlier commit(s) omitted", out)
+        self.assertIn("subject9", out)             # newest always shown
+        self.assertNotIn("subject3", out)          # oldest dropped
+        self.assertEqual(ch.brief._commit_bullets([]), "")
 
 
 class VisibleFailureTests(unittest.TestCase):
@@ -1864,6 +1895,46 @@ class BriefHookTests(unittest.TestCase):
         # the commit at ts 2000 postdates the distillation at ts 1500
         self.assertIn("commit(s) newer than this memory", out)
         self.assertNotIn("newer than this brief", out)   # sessions are fine
+        # the brief file was built AFTER that commit (built=now), so its
+        # own notes already carry it — the hook must not re-list it
+        self.assertNotIn("fix parser", out)
+
+    def test_injection_lists_commits_the_brief_has_not_seen(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+                tempfile.TemporaryDirectory() as repo:
+            logs = Path(repo) / ".git" / "logs"
+            logs.mkdir(parents=True)
+            (logs / "HEAD").write_text(
+                f"{'0' * 40} {'b' * 40} You <y@x> 2000 +0200"
+                "\tcommit: fix parser\n", encoding="utf-8")
+            payload = json.dumps({"cwd": repo})
+            # brief last rebuilt at 1600 — the commit at 2000 appears in
+            # none of its notes, so the hook lists sha+subject itself
+            stale = (ch.brief.make_stamp(1, newest_mtime=9999999999,
+                                         distilled=1500,
+                                         distilled_sessions=1,
+                                         provider="claude-cli", now=1600)
+                     + "\n# Project brief: x\n")
+            (Path(td) / "-r.md").write_text(stale, encoding="utf-8")
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "cwd_project_filter",
+                        lambda cwd=None, *a, **k: "-r"), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "find_sessions",
+                        lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(sys, "stdin",
+                                               io.StringIO(payload)):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    ch.run_brief_hook_mode()
+        out = buf.getvalue()
+        self.assertIn("commit(s) newer than this memory", out)
+        self.assertIn("- `bbbbbbbb` fix parser", out)
 
     def test_hook_stdin_emits_brief_as_context(self):
         import contextlib

@@ -142,6 +142,8 @@ and writes one memory document to `~/.claude/briefs/<project>.md`:
   bugs, conventions, open threads — every bullet cited with the session id
   it came from (`chf --name <id>` opens the source).
 
+![chf --brief in action — the whole project history distilled into cited memory](docs/assets/demo-brief.gif)
+
 Per-session notes are cached, so refreshing after new sessions only pays
 for the new ones — and a monster session (beyond ~120k chars) is
 map-reduced *inside* the note, so the memory path never truncates:

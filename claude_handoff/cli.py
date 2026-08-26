@@ -428,7 +428,7 @@ def _run_brief(args: argparse.Namespace) -> None:
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(doc, encoding="utf-8")
-    print(f"Wrote brief {dest} ({len(parsed_list)} sessions, "
+    print(f"Wrote brief {tilde(dest)} ({len(parsed_list)} sessions, "
           f"\u2248{_fmt_tokens(len(doc) // 4)} tokens)", file=sys.stderr)
 
 

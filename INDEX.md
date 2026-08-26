@@ -32,6 +32,7 @@ claude-handoff/
 ├── LICENSE                ← MIT
 ├── pyproject.toml         ← packaging (`claude-handoff` + `chf` commands),
 │                            ruff lint config
+├── glama.json             ← Glama MCP directory metadata (maintainers)
 ├── .gitignore             ← also excludes docs/RESEARCH.md (internal notes)
 ├── .github/workflows/
 │   ├── ci.yml             ← tests on Linux/macOS/Windows × Python 3.9/3.13

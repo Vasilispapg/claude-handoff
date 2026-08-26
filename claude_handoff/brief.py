@@ -396,7 +396,7 @@ TIMELINE_CAP = 20            # timeline bullets injected per session start
 STAMP_RE = re.compile(
     r"<!-- claude-handoff-brief v=1 built=(\d+) sessions=(\d+) "
     r"newest_mtime=(\d+) distilled=(\d+) distilled_sessions=(\d+) "
-    r"provider=(\S+) -->")
+    r"provider=(\S+?)(?: exclude=(\S+))?(?: keep=(\S+))? -->")
 DISTILLED_MARK = "\n## Distilled memory\n"
 _FRESHNESS_NOTE_RE = re.compile(
     r"\n_\d+ newer session\(s\) since this distillation[^\n]*_\n"
@@ -408,15 +408,21 @@ _GIT_NOTE_RE = re.compile(
 
 def make_stamp(sessions: int, newest_mtime: int, distilled: int,
                distilled_sessions: int, provider: str,
-               now: int | None = None) -> str:
+               now: int | None = None, exclude: str = "",
+               keep: str = "") -> str:
     """Machine-readable freshness marker embedded in the brief file —
-    what the SessionStart/SessionEnd hooks use to reason about staleness."""
+    what the SessionStart/SessionEnd hooks use to reason about staleness.
+    `exclude` (comma-joined id prefixes) and `keep` (--keep window spec)
+    make session selection sticky: hooks and rebuilds re-apply them;
+    absent, the stamp is byte-identical to the pre-selection format."""
     built = int(time.time()) if now is None else int(now)
+    extra = (f" exclude={exclude}" if exclude else "") + (
+        f" keep={keep}" if keep else "")
     return (f"<!-- claude-handoff-brief v=1 built={built} "
             f"sessions={sessions} newest_mtime={int(newest_mtime)} "
             f"distilled={int(distilled)} "
             f"distilled_sessions={int(distilled_sessions)} "
-            f"provider={provider} -->")
+            f"provider={provider}{extra} -->")
 
 
 def parse_stamp(text: str) -> dict | None:
@@ -426,7 +432,65 @@ def parse_stamp(text: str) -> dict | None:
     built, sessions, newest, dist, dsess = (int(g) for g in m.groups()[:5])
     return {"built": built, "sessions": sessions, "newest_mtime": newest,
             "distilled": dist, "distilled_sessions": dsess,
-            "provider": m.group(6)}
+            "provider": m.group(6),
+            "exclude": m.group(7).split(",") if m.group(7) else [],
+            "keep": m.group(8) or ""}
+
+
+def parse_keep(spec: str) -> tuple:
+    """(first, last) counts from a --keep spec — 'first:2,last:20',
+    bare N meaning last:N, 'all' meaning no window. Anything else is a
+    visible usage error, never a silent guess."""
+    if spec in ("", "all"):
+        return 0, 0
+    first = last = 0
+    for part in spec.split(","):
+        m = re.fullmatch(r"(?:(first|last):)?(\d+)", part.strip())
+        if not m or int(m.group(2)) == 0:
+            raise SystemExit(
+                f"--keep {spec!r}: use N, first:N, last:N or a "
+                f"combination — e.g. --keep 20 or --keep first:2,last:20.")
+        if m.group(1) == "first":
+            first += int(m.group(2))
+        else:
+            last += int(m.group(2))
+    return first, last
+
+
+def apply_keep(parsed_list: list, spec: str) -> list:
+    """Chronological session window: the first F (founding) and last L
+    (recent) sessions; the middle stays out of the brief. Sticky via
+    the stamp, so every refresh re-applies it — a sliding window."""
+    first, last = parse_keep(spec)
+    if not first and not last:
+        return parsed_list
+    ordered = sorted(parsed_list,
+                     key=lambda p: p["meta"]["first_ts"] or "")
+    head = ordered[:first]
+    tail = ordered[-last:] if last else []
+    seen: set = set()
+    kept = []
+    for p in head + tail:
+        if id(p) not in seen:
+            seen.add(id(p))
+            kept.append(p)
+    return kept
+
+
+def apply_excludes(parsed_list: list, excludes: list) -> tuple:
+    """(kept sessions, prefixes that matched) — a session is left out of
+    the brief entirely when its id starts with any exclude prefix."""
+    if not excludes:
+        return parsed_list, []
+    kept, matched = [], []
+    for p in parsed_list:
+        sid = p["meta"]["session_id"] or ""
+        hit = next((e for e in excludes if e and sid.startswith(e)), None)
+        if hit is None:
+            kept.append(p)
+        else:
+            matched.append(hit)
+    return kept, matched
 
 
 def brief_label(parsed_list: list, scope: str) -> str:
@@ -505,12 +569,16 @@ def update_brief_skeleton(project: str) -> bool:
     if stamp is None:
         return False
     parsed_list, newest = load_project_sessions(project)
+    parsed_list = apply_keep(parsed_list, stamp["keep"])
+    parsed_list, _ = apply_excludes(parsed_list, stamp["exclude"])
     if not parsed_list:
         return False
     label = brief_label(parsed_list, project)
     doc = graft_distilled(old, build_brief_deterministic(parsed_list, label),
                           stamp, label, parsed_list)
     new_stamp = make_stamp(len(parsed_list), newest, stamp["distilled"],
-                           stamp["distilled_sessions"], stamp["provider"])
+                           stamp["distilled_sessions"], stamp["provider"],
+                           exclude=",".join(stamp["exclude"]),
+                           keep=stamp["keep"])
     path.write_text(new_stamp + "\n" + doc, encoding="utf-8")
     return True

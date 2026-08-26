@@ -149,6 +149,13 @@ for the new ones — and a monster session (beyond ~120k chars) is
 map-reduced *inside* the note, so the memory path never truncates:
 nothing is silently dropped, at any size.
 
+You can also curate what feeds the memory: `--exclude <id>` leaves a
+session out (a duplicate, an experiment — bare `--exclude` opens a
+numbered picker), and `--keep first:2,last:20` windows a huge history to
+the founding sessions plus a sliding recent window. Both are **sticky** —
+stored in the brief's stamp, so hooks and later refreshes keep honoring
+them until you change them (`--exclude none`, `--keep all`).
+
 ```bash
 chf --install-brief-hook
 ```
@@ -252,6 +259,8 @@ chf --llm claude-cli --focus "emphasize the API decisions"
 # project memory:
 chf --brief                        # free factual brief (timeline + files)
 chf --brief --llm claude-cli       # + distilled decisions/fixes/conventions
+chf --brief --exclude              # numbered picker: leave sessions out (sticky)
+chf --brief --keep first:2,last:20 # bound a huge history: founding + recent
 ```
 
 **Where does it look?** Sessions live in Claude Code's global store
@@ -400,6 +409,8 @@ Set `PYTHONUTF8=1` (the CI runs the whole suite that way).
 | `--last N` / `--since 2h` | keep only the tail of the conversation (N user turns / a time window) |
 | `--merge` | merge every session in scope into ONE handoff (session-break markers, summed activity) |
 | `--brief` | distill the project's whole history into `~/.claude/briefs/<project>.md` (deterministic; `--llm` for real distillation) |
+| `--exclude ID` | with `--brief`: leave session(s) out of the memory — an id prefix (from `--list` or the brief's citations), comma-separate or repeat for several; **bare `--exclude` opens a numbered picker**; sticky across refreshes, `--exclude none` clears |
+| `--keep SPEC` | with `--brief`: window the sessions that feed the memory — `20` / `last:20` (most recent), `first:2` (founding), or `first:2,last:20`; sticky, so refreshes keep a **sliding window**; `--keep all` clears |
 | `--install-brief-hook` / `--uninstall-brief-hook` | project memory hooks: inject the brief at SessionStart, auto-refresh facts at SessionEnd |
 | `--install-hook` / `--uninstall-hook` | auto-write a handoff to `~/.claude/handoffs/` when each session ends |
 | `--format md\|json` | markdown (default) or machine-readable JSON — also applies to `--list` |

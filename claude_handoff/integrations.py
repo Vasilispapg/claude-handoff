@@ -338,9 +338,13 @@ def run_brief_hook_mode() -> None:
         stale_note = ""
         if stamp:
             current = payload.get("transcript_path", "")
+            excluded = tuple(e for e in stamp["exclude"] if e)
             newest = max((s.stat().st_mtime
                           for s in find_sessions(project)
-                          if str(s) != current), default=0)
+                          if str(s) != current
+                          and not (excluded
+                                   and s.stem.startswith(excluded))),
+                         default=0)
             if newest > stamp["newest_mtime"]:
                 stale_note = ("\n(warning: sessions newer than this "
                               "brief exist — refresh with "

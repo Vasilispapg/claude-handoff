@@ -1525,8 +1525,15 @@ class BriefFreshnessTests(unittest.TestCase):
         self.assertEqual(meta, {"built": 1234, "sessions": 5,
                                 "newest_mtime": 1000, "distilled": 900,
                                 "distilled_sessions": 4,
-                                "provider": "claude-cli"})
+                                "provider": "claude-cli", "exclude": [],
+                                "keep": ""})
         self.assertIsNone(ch.brief.parse_stamp("no stamp here"))
+        # optional exclude field — absent stays byte-identical to the
+        # old format, present round-trips as a list
+        stamp = ch.brief.make_stamp(5, 1000, 900, 4, "claude-cli",
+                                    now=1234, exclude="abc123,zzz")
+        self.assertEqual(ch.brief.parse_stamp(stamp)["exclude"],
+                         ["abc123", "zzz"])
 
     def test_update_refreshes_skeleton_keeps_distilled_with_note(self):
         import contextlib
@@ -1686,6 +1693,172 @@ class BriefCategoryTests(unittest.TestCase):
         self.assertIn("subject9", out)             # newest always shown
         self.assertNotIn("subject3", out)          # oldest dropped
         self.assertEqual(ch.brief._commit_bullets([]), "")
+
+
+class BriefExcludeTests(unittest.TestCase):
+    """--exclude: leave sessions out of the living brief — everywhere,
+    sticky across refreshes via the stamp, interactive when bare."""
+
+    def _run(self, td, extra):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with unittest.mock.patch.object(
+                ch.brief, "find_sessions",
+                lambda *a, **k: [FIXTURE, AGENT_SESSION]), \
+                unittest.mock.patch.object(
+                    ch.cli, "cwd_project_filter",
+                    lambda *a, **k: "-home-vspapg-myapp"), \
+                unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                           Path(td)), \
+                contextlib.redirect_stderr(buf):
+            ch.main(["--brief", *extra])
+        text = (Path(td) / "-home-vspapg-myapp.md").read_text(
+            encoding="utf-8")
+        return text, buf.getvalue()
+
+    def test_exclude_drops_session_everywhere_and_sticks_in_stamp(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            # comma form + an unmatched prefix that must warn visibly
+            text, err = self._run(td, ["--exclude", "abc123,zzz"])
+        self.assertNotIn("Fix login bug", text)          # timeline
+        self.assertIn("Parallel refactor", text)         # others kept
+        self.assertIn("1 sessions", text)                # counts follow
+        self.assertIn("exclude=abc123", text)            # sticky stamp
+        self.assertNotIn("zzz", text)
+        self.assertIn("zzz", err)                        # matches nothing
+
+    def test_stored_exclusion_survives_refresh_and_hook_update(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._run(td, ["--exclude", "abc123"])
+            text, _ = self._run(td, [])          # no flag → stored set
+            self.assertNotIn("Fix login bug", text)
+            with unittest.mock.patch.object(
+                    ch.brief, "find_sessions",
+                    lambda *a, **k: [FIXTURE, AGENT_SESSION]), \
+                    unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                               Path(td)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.brief.update_brief_skeleton("-home-vspapg-myapp")
+            text = (Path(td) / "-home-vspapg-myapp.md").read_text(
+                encoding="utf-8")
+        self.assertNotIn("Fix login bug", text)          # hook respects it
+        self.assertIn("exclude=abc123", text)            # and re-stamps it
+
+    def test_exclude_none_clears_the_stored_set(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._run(td, ["--exclude", "abc123"])
+            text, _ = self._run(td, ["--exclude", "none"])
+        self.assertIn("Fix login bug", text)             # back in
+        self.assertNotIn("exclude=", text)
+
+    def test_everything_excluded_is_a_clean_error(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with unittest.mock.patch.object(
+                    ch.brief, "find_sessions",
+                    lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(
+                        ch.cli, "cwd_project_filter",
+                        lambda *a, **k: "-p"), \
+                    unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                               Path(td)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    ch.main(["--brief", "--exclude", "abc123"])
+        self.assertIn("excluded", str(cm.exception))
+
+    def test_bare_exclude_opens_numbered_multiselect(self):
+        # `--exclude` with no value → pick by number from a list that
+        # shows date, id AND title — "1" is the oldest session
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+                unittest.mock.patch.object(ch.sys.stdin, "isatty",
+                                           lambda: True), \
+                unittest.mock.patch("builtins.input", side_effect=["1"]):
+            text, err = self._run(td, ["--exclude"])
+        self.assertIn("Fix login bug", err)              # titles listed
+        self.assertNotIn("Fix login bug", text)          # oldest excluded
+        self.assertIn("Parallel refactor", text)
+        self.assertIn("exclude=abc123", text)            # stored as id
+
+    def test_bare_exclude_without_terminal_errors(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+                unittest.mock.patch.object(ch.sys.stdin, "isatty",
+                                           lambda: False):
+            with self.assertRaises(SystemExit) as cm:
+                self._run(td, ["--exclude"])
+        self.assertIn("terminal", str(cm.exception))
+
+    def test_keep_window_first_and_last(self):
+        # --keep first:2,last:3 → founding sessions + recent window,
+        # chronological, overlap deduped; bare N means last:N
+        parsed = [_synth_parsed(i) for i in range(7)]
+        kept = ch.brief.apply_keep(parsed, "first:2,last:3")
+        sids = [p["meta"]["session_id"] for p in kept]
+        self.assertEqual(sids, ["synth000", "synth001",
+                                "synth004", "synth005", "synth006"])
+        self.assertEqual(len(ch.brief.apply_keep(parsed, "2")), 2)
+        self.assertEqual(ch.brief.apply_keep(parsed, "all"), parsed)
+        self.assertEqual(len(ch.brief.apply_keep(parsed, "first:5,last:5")),
+                         7)                              # overlap dedupes
+        with self.assertRaises(SystemExit):
+            ch.brief.apply_keep(parsed, "newest:3")
+
+    def test_keep_is_a_sticky_sliding_window(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            text, _ = self._run(td, ["--keep", "last:1"])
+            self.assertNotIn("Fix login bug", text)      # older is out
+            self.assertIn("Parallel refactor", text)     # newest kept
+            self.assertIn("keep=last:1", text)           # sticky stamp
+            text, _ = self._run(td, [])                  # no flag → stored
+            self.assertNotIn("Fix login bug", text)
+            text, _ = self._run(td, ["--keep", "all"])   # explicit clear
+            self.assertIn("Fix login bug", text)
+            self.assertNotIn("keep=", text)
+
+    def test_keep_without_brief_errors(self):
+        with self.assertRaises(SystemExit) as cm:
+            ch.main(["--keep", "last:5"])
+        self.assertIn("--brief", str(cm.exception))
+
+    def test_hook_staleness_ignores_excluded_sessions(self):
+        import contextlib
+        import io
+        import tempfile
+        payload = json.dumps({"cwd": "/home/vspapg/myapp"})
+        # FIXTURE is newer than the stamp but excluded → no nagging
+        stale = (ch.brief.make_stamp(1, newest_mtime=10, distilled=0,
+                                     distilled_sessions=0, provider="none",
+                                     exclude=FIXTURE.stem[:8])
+                 + "\n# Project brief: x\n")
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                stale, encoding="utf-8")
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "cwd_project_filter",
+                        lambda cwd=None, *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "find_sessions",
+                        lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(sys, "stdin",
+                                               io.StringIO(payload)):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    ch.run_brief_hook_mode()
+        self.assertIn("project-memory", buf.getvalue())
+        self.assertNotIn("newer than this brief", buf.getvalue())
 
 
 class VisibleFailureTests(unittest.TestCase):

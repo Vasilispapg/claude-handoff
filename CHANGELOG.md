@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Curate what feeds the memory — `--exclude` and `--keep`**:
+  `--brief --exclude ID[,ID…]` leaves sessions out of the brief entirely
+  (timeline, counts, notes, freshness nags); bare `--exclude` opens a
+  numbered multi-select picker (date, id, title — `1,3` / `2-4`).
+  `--keep first:2,last:20` (bare `20` = `last:20`) windows a huge
+  history to the founding sessions plus the recent ones. Both are
+  sticky: stored in the brief's stamp, re-applied by hooks and every
+  refresh (a sliding window, in `--keep`'s case), cleared with
+  `--exclude none` / `--keep all`. Typo'd exclude prefixes warn and are
+  not stored; excluding everything is a clean error.
+
 - **The brief now says what you're building**: the distilled memory
   opens with a `## What this is` section — the 2-3 sentences a stranger
   (or another model) needs first: product, stack, current state. Added

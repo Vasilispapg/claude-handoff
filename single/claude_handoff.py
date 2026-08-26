@@ -2282,7 +2282,7 @@ TIMELINE_CAP = 20            # timeline bullets injected per session start
 STAMP_RE = re.compile(
     r"<!-- claude-handoff-brief v=1 built=(\d+) sessions=(\d+) "
     r"newest_mtime=(\d+) distilled=(\d+) distilled_sessions=(\d+) "
-    r"provider=(\S+) -->")
+    r"provider=(\S+?)(?: exclude=(\S+))?(?: keep=(\S+))? -->")
 DISTILLED_MARK = "\n## Distilled memory\n"
 _FRESHNESS_NOTE_RE = re.compile(
     r"\n_\d+ newer session\(s\) since this distillation[^\n]*_\n"
@@ -2294,15 +2294,21 @@ _GIT_NOTE_RE = re.compile(
 
 def make_stamp(sessions: int, newest_mtime: int, distilled: int,
                distilled_sessions: int, provider: str,
-               now: int | None = None) -> str:
+               now: int | None = None, exclude: str = "",
+               keep: str = "") -> str:
     """Machine-readable freshness marker embedded in the brief file —
-    what the SessionStart/SessionEnd hooks use to reason about staleness."""
+    what the SessionStart/SessionEnd hooks use to reason about staleness.
+    `exclude` (comma-joined id prefixes) and `keep` (--keep window spec)
+    make session selection sticky: hooks and rebuilds re-apply them;
+    absent, the stamp is byte-identical to the pre-selection format."""
     built = int(time.time()) if now is None else int(now)
+    extra = (f" exclude={exclude}" if exclude else "") + (
+        f" keep={keep}" if keep else "")
     return (f"<!-- claude-handoff-brief v=1 built={built} "
             f"sessions={sessions} newest_mtime={int(newest_mtime)} "
             f"distilled={int(distilled)} "
             f"distilled_sessions={int(distilled_sessions)} "
-            f"provider={provider} -->")
+            f"provider={provider}{extra} -->")
 
 
 def parse_stamp(text: str) -> dict | None:
@@ -2312,7 +2318,65 @@ def parse_stamp(text: str) -> dict | None:
     built, sessions, newest, dist, dsess = (int(g) for g in m.groups()[:5])
     return {"built": built, "sessions": sessions, "newest_mtime": newest,
             "distilled": dist, "distilled_sessions": dsess,
-            "provider": m.group(6)}
+            "provider": m.group(6),
+            "exclude": m.group(7).split(",") if m.group(7) else [],
+            "keep": m.group(8) or ""}
+
+
+def parse_keep(spec: str) -> tuple:
+    """(first, last) counts from a --keep spec — 'first:2,last:20',
+    bare N meaning last:N, 'all' meaning no window. Anything else is a
+    visible usage error, never a silent guess."""
+    if spec in ("", "all"):
+        return 0, 0
+    first = last = 0
+    for part in spec.split(","):
+        m = re.fullmatch(r"(?:(first|last):)?(\d+)", part.strip())
+        if not m or int(m.group(2)) == 0:
+            raise SystemExit(
+                f"--keep {spec!r}: use N, first:N, last:N or a "
+                f"combination — e.g. --keep 20 or --keep first:2,last:20.")
+        if m.group(1) == "first":
+            first += int(m.group(2))
+        else:
+            last += int(m.group(2))
+    return first, last
+
+
+def apply_keep(parsed_list: list, spec: str) -> list:
+    """Chronological session window: the first F (founding) and last L
+    (recent) sessions; the middle stays out of the brief. Sticky via
+    the stamp, so every refresh re-applies it — a sliding window."""
+    first, last = parse_keep(spec)
+    if not first and not last:
+        return parsed_list
+    ordered = sorted(parsed_list,
+                     key=lambda p: p["meta"]["first_ts"] or "")
+    head = ordered[:first]
+    tail = ordered[-last:] if last else []
+    seen: set = set()
+    kept = []
+    for p in head + tail:
+        if id(p) not in seen:
+            seen.add(id(p))
+            kept.append(p)
+    return kept
+
+
+def apply_excludes(parsed_list: list, excludes: list) -> tuple:
+    """(kept sessions, prefixes that matched) — a session is left out of
+    the brief entirely when its id starts with any exclude prefix."""
+    if not excludes:
+        return parsed_list, []
+    kept, matched = [], []
+    for p in parsed_list:
+        sid = p["meta"]["session_id"] or ""
+        hit = next((e for e in excludes if e and sid.startswith(e)), None)
+        if hit is None:
+            kept.append(p)
+        else:
+            matched.append(hit)
+    return kept, matched
 
 
 def brief_label(parsed_list: list, scope: str) -> str:
@@ -2391,13 +2455,17 @@ def update_brief_skeleton(project: str) -> bool:
     if stamp is None:
         return False
     parsed_list, newest = load_project_sessions(project)
+    parsed_list = apply_keep(parsed_list, stamp["keep"])
+    parsed_list, _ = apply_excludes(parsed_list, stamp["exclude"])
     if not parsed_list:
         return False
     label = brief_label(parsed_list, project)
     doc = graft_distilled(old, build_brief_deterministic(parsed_list, label),
                           stamp, label, parsed_list)
     new_stamp = make_stamp(len(parsed_list), newest, stamp["distilled"],
-                           stamp["distilled_sessions"], stamp["provider"])
+                           stamp["distilled_sessions"], stamp["provider"],
+                           exclude=",".join(stamp["exclude"]),
+                           keep=stamp["keep"])
     path.write_text(new_stamp + "\n" + doc, encoding="utf-8")
     return True
 
@@ -2712,9 +2780,13 @@ def run_brief_hook_mode() -> None:
         stale_note = ""
         if stamp:
             current = payload.get("transcript_path", "")
+            excluded = tuple(e for e in stamp["exclude"] if e)
             newest = max((s.stat().st_mtime
                           for s in find_sessions(project)
-                          if str(s) != current), default=0)
+                          if str(s) != current
+                          and not (excluded
+                                   and s.stem.startswith(excluded))),
+                         default=0)
             if newest > stamp["newest_mtime"]:
                 stale_note = ("\n(warning: sessions newer than this "
                               "brief exist — refresh with "
@@ -2821,6 +2893,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "memory brief (~/.claude/briefs/<project>.md); "
                          "deterministic timeline by default, real "
                          "distillation with --llm")
+    ap.add_argument("--keep", metavar="SPEC",
+                    help="with --brief: window the sessions that feed "
+                         "the brief — N or last:N (the N most recent), "
+                         "first:N (the founding ones), or a combination "
+                         "like first:2,last:20; sticky across refreshes "
+                         "(a sliding window), --keep all clears")
+    ap.add_argument("--exclude", metavar="ID", action="append",
+                    nargs="?", const="",
+                    help="with --brief: leave session(s) out of the "
+                         "brief — ID is an id prefix (see --list or the "
+                         "brief's citations), comma-separate or repeat "
+                         "for several; bare --exclude opens a numbered "
+                         "picker; sticky across refreshes, --exclude "
+                         "none clears")
     ap.add_argument("--merge", action="store_true",
                     help="merge every session in scope (project / cwd / "
                          "--name match) into ONE handoff, oldest first")
@@ -3101,6 +3187,50 @@ def _load_config() -> dict:
     return cfg
 
 
+def _pick_excludes(parsed_list: list) -> list:
+    """Bare --exclude: numbered multi-select of sessions to LEAVE OUT
+    ("2", "1,3", "2-4") — shown with date, id and title. Terminal only."""
+    if not sys.stdin.isatty():
+        raise SystemExit("bare --exclude needs a terminal — pass ids "
+                         "instead: --exclude ID[,ID…] (see --list).")
+    ordered = sorted(parsed_list,
+                     key=lambda p: p["meta"]["first_ts"] or "")
+    print("Pick the session(s) to EXCLUDE from the brief "
+          "(e.g. 2 or 1,3 or 2-4; empty keeps all):", file=sys.stderr)
+    for i, p in enumerate(ordered, 1):
+        meta = p["meta"]
+        print(f"  {i}. {fmt_ts(meta['first_ts'])}  "
+              f"{(meta['session_id'] or '?')[:8]}  "
+              f"{one_line(_session_title(p), 60)}", file=sys.stderr)
+    while True:
+        choice = input("> ").strip()
+        if not choice:
+            return []
+        picked = _parse_pick(choice, len(ordered))
+        if picked:
+            return [(ordered[i - 1]["meta"]["session_id"] or "")[:8]
+                    for i in picked]
+        print("Try again — a number, 1,3 or 2-4.", file=sys.stderr)
+
+
+def _resolve_excludes(args: argparse.Namespace, old_stamp: dict | None,
+                      parsed_list: list) -> list:
+    """The exclusion set for this run: an explicit --exclude replaces
+    the stored one ('none' clears, bare opens the picker); no flag
+    keeps whatever the stamp already carries — sticky, like the
+    distillation itself."""
+    raw = args.exclude or []
+    if not raw:
+        return old_stamp["exclude"] if old_stamp else []
+    explicit = [e for chunk in raw if chunk
+                for e in chunk.split(",") if e]
+    if "none" in explicit:
+        return []
+    if "" in raw:
+        explicit += _pick_excludes(parsed_list)
+    return list(dict.fromkeys(explicit))
+
+
 def _run_brief(args: argparse.Namespace) -> None:
     """--brief: whole-project memory document (see brief.py)."""
     scope = args.project
@@ -3118,8 +3248,29 @@ def _run_brief(args: argparse.Namespace) -> None:
     if not parsed_list:
         raise SystemExit(f"No sessions to brief for {scope!r} — "
                          f"run --list.")
+    prior = brief_path(scope) if args.output == "handoff.md" else None
+    old = (prior.read_text(encoding="utf-8")
+           if prior is not None and prior.is_file() else None)
+    old_stamp = parse_stamp(old) if old else None
+    if args.keep is not None:
+        keep = "" if args.keep == "all" else args.keep
+        parse_keep(keep)                       # validate loudly, upfront
+    else:
+        keep = old_stamp["keep"] if old_stamp else ""
+    parsed_list = apply_keep(parsed_list, keep)
+    excludes = _resolve_excludes(args, old_stamp, parsed_list)
+    parsed_list, matched = apply_excludes(parsed_list, excludes)
+    for e in excludes:
+        if e not in matched:
+            print(f"--exclude {e!r} matches no session of {scope!r}",
+                  file=sys.stderr)
+    if not parsed_list:
+        raise SystemExit("every session excluded — nothing left to "
+                         "brief.")
+    # only prefixes that matched persist — a typo warns, it doesn't
+    # live in the stamp forever
+    excludes = list(dict.fromkeys(matched))
     label = brief_label(parsed_list, scope)
-    old_stamp = None
     if args.llm:
         doc = build_brief_llm(parsed_list, label, args.llm,
                               args.model, focus=args.focus,
@@ -3130,30 +3281,27 @@ def _run_brief(args: argparse.Namespace) -> None:
         # rebuilding the free skeleton must not discard a paid
         # distillation living in the stamped brief file (-o elsewhere
         # stays a plain skeleton)
-        prior = brief_path(scope) if args.output == "handoff.md" else None
-        if prior is not None and prior.is_file():
-            old = prior.read_text(encoding="utf-8")
-            old_stamp = parse_stamp(old)
-            if old_stamp:
-                doc = graft_distilled(old, doc, old_stamp, label,
-                                      parsed_list)
+        if old_stamp:
+            doc = graft_distilled(old, doc, old_stamp, label,
+                                  parsed_list)
     if not args.no_redact:
         doc = redact_doc(doc)
     if getattr(args, "anonymize", False):
         doc, _ = anonymize_text(doc)
+    exc = ",".join(excludes)
     if args.llm:
         stamp = make_stamp(len(parsed_list), newest_mtime,
                            distilled=int(time.time()),
                            distilled_sessions=len(parsed_list),
-                           provider=args.llm)
+                           provider=args.llm, exclude=exc, keep=keep)
     elif old_stamp:
         stamp = make_stamp(len(parsed_list), newest_mtime,
                            old_stamp["distilled"],
                            old_stamp["distilled_sessions"],
-                           old_stamp["provider"])
+                           old_stamp["provider"], exclude=exc, keep=keep)
     else:
         stamp = make_stamp(len(parsed_list), newest_mtime, 0, 0,
-                           "none")
+                           "none", exclude=exc, keep=keep)
     doc = stamp + "\n" + doc
     dest = (brief_path(scope) if args.output == "handoff.md"
             else args.output)
@@ -3209,6 +3357,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.brief:
         _run_brief(args)
         return
+    if args.exclude or args.keep is not None:
+        raise SystemExit("--exclude/--keep shape the project brief — "
+                         "use them with --brief.")
     if len(args.session) > 1:
         sources = [Path(p).expanduser() for p in args.session]
         missing = [str(x) for x in sources if not x.is_file()]

@@ -1,5 +1,67 @@
 # Changelog
 
+## Unreleased
+
+- **`--install-skill` — the tool teaches Claude to drive it**: ships
+  the `/claude-handoff` Claude Code skill (canonical copy at
+  `skills/claude-handoff/SKILL.md`, embedded as `SKILL_MD` so pip,
+  brew and the single file all carry it — pinned byte-identical by a
+  test) and installs it under `~/.claude/skills/claude-handoff/` plus
+  an idempotent trigger section in `~/.claude/CLAUDE.md` — a
+  hand-written `# claude-handoff` heading is respected, never
+  duplicated. `--uninstall-skill` removes both; every other line of
+  CLAUDE.md survives byte-for-byte (round-trip test-pinned). The
+  skill's steps encode the traps an agent actually falls into without
+  it (baseline-measured): flags-not-subcommands, `claude-cli` =
+  subscription vs `claude` = API key, `--fit` (not `--max-tokens`)
+  for budgets, bare `chf` inside a live session exporting the CURRENT
+  session (`--list` + `--name <id>` reaches the crashed one), and no
+  TTY pickers (`-i`, bare `--exclude`) from an agent shell.
+- **The `--exclude` picker remembers**: bare `--exclude` now opens the
+  numbered list with the stamp's stored exclusions pre-selected (✗),
+  and typed numbers TOGGLE — add a new exclusion or un-exclude an old
+  one without re-picking the whole set. Empty input keeps the ✗ set as
+  is (before, it silently replaced the stored set with nothing), and
+  `none` inside the picker clears everything, consistent with
+  `--exclude none`. With no stored set the picker behaves exactly as
+  before.
+- **graphify bridge — both directions, zero config**: `-o graphify`
+  files the (redacted) document into `raw/` — graphify's ingest
+  folder — with the YAML frontmatter graphify maps onto nodes
+  (`captured_at`, `source_url`, `contributor`). The brief becomes ONE
+  evolving `raw/project-memory.md` (grafted distillation included,
+  overwritten so the graph always holds the current state — git owns
+  the history), a handoff becomes `raw/session-<id>.md`; the next
+  `/graphify --update` links your decisions, fixes and open threads
+  into the code's knowledge graph. Never invokes graphify itself
+  (tools stay decoupled — the next step is printed instead), warns
+  when `raw/` isn't gitignored, and `--brief --grep -o graphify` is a
+  loud error so a thematic export can't overwrite the standing corpus
+  doc.
+- **`## Code map` in the brief**: when `graphify-out/graph.json` sits
+  next to the project, the deterministic skeleton — and so the memory
+  injected at session start — gains a capped structural map:
+  node/edge/community counts, the top communities with their hub
+  concepts (labels from `.graphify_labels.json` when present), the
+  graph's build date, and how many commits it is behind HEAD (via
+  `built_at_commit` against the reflog). Free, automatic, and a silent
+  no-op without a graph — any surprise in the file means no section,
+  never an error.
+- **Code map carries knowledge, not just structure**: a `bridges:` line
+  names the strongest links that CROSS community boundaries (endpoint,
+  relation, and the two communities — where the subsystems actually
+  touch) and a `flows:` line lists graphify's labeled hyperedges
+  (multi-node flows and patterns). Both capped at 3, both straight from
+  `graph.json`, both silently absent when the graph has none.
+- **The brief lives in the project too**: in-project copies refresh
+  automatically whenever the store brief is (re)written — by an
+  explicit `chf --brief` AND by the SessionEnd hook. Two mirrors, both
+  strictly refresh-only (the hook never creates files): create
+  `raw/project-memory.md` once with `-o graphify` and it stays fresh
+  for `/graphify --update`; `touch BRIEF.md` at the repo root and a
+  plain human/git copy of the exact store text stays fresh there.
+  Delete either file to opt out.
+
 ## 0.19.0 — 2026-08-26
 
 - **Standing memory from a web history**: `chf conversations.json

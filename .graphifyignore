@@ -1,0 +1,10 @@
+# graphify scan rules: mirrors .gitignore EXCEPT raw/ — the session-memory
+# corpus stays out of git (see .gitignore) but INSIDE the knowledge graph.
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg-info/
+handoff.md
+err.log
+docs/RESEARCH.md

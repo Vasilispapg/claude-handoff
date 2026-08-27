@@ -3,6 +3,7 @@ into one persistent memory document another session can start from."""
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import re
 import sys
@@ -128,6 +129,110 @@ def _commit_bullets(commits: list) -> str:
     return out
 
 
+CODE_MAP_CAP = 6             # communities listed in the code map
+BRIDGE_CAP = 3               # bridges / flows listed in the code map
+
+
+def _code_bridges(nodes: list, links: list, degree: dict,
+                  titles: dict) -> list:
+    """One `bridges:` line naming the strongest links that cross
+    community boundaries — where the subsystems actually touch."""
+    comm = {n.get("id"): n.get("community") for n in nodes}
+    label = {n.get("id"): str(n.get("label") or n.get("id") or "?")
+             for n in nodes}
+    cross = [e for e in links
+             if comm.get(e.get("source")) is not None
+             and comm.get(e.get("target")) is not None
+             and comm[e["source"]] != comm[e["target"]]]
+    cross.sort(key=lambda e: (-(degree.get(e["source"], 0)
+                                + degree.get(e["target"], 0)),
+                              str(e["source"])))
+    parts = []
+    for e in cross[:BRIDGE_CAP]:
+        rel = str(e.get("relation") or "").strip()
+        arrow = f"—{rel}→" if rel else "→"
+        parts.append(f"{label[e['source']]} {arrow} {label[e['target']]} "
+                     f"({titles.get(comm[e['source']], '?')} ↔ "
+                     f"{titles.get(comm[e['target']], '?')})")
+    return ["- bridges: " + "; ".join(parts)] if parts else []
+
+
+def _code_flows(hyperedges: list, nodes: list) -> list:
+    """One `flows:` line for the labeled multi-node patterns graphify
+    found (hyperedges) — flows, protocols, shared concepts."""
+    label = {n.get("id"): str(n.get("label") or n.get("id") or "?")
+             for n in nodes}
+    flows = [h for h in hyperedges
+             if isinstance(h, dict) and h.get("label") and h.get("nodes")]
+    flows.sort(key=lambda h: (-len(h["nodes"]), str(h["label"])))
+    parts = []
+    for h in flows[:BRIDGE_CAP]:
+        shown = ", ".join(label.get(i, str(i)) for i in h["nodes"][:5])
+        parts.append(f"{h['label']} ({shown})")
+    return ["- flows: " + "; ".join(parts)] if parts else []
+
+
+def _code_map(project_dir) -> list:
+    """`## Code map` lines from a graphify knowledge graph
+    (`graphify-out/graph.json`, networkx node-link JSON) sitting next to
+    the project — the brief then carries the code's structure, not just
+    its history. Free and automatic; tolerant like the git helpers: any
+    surprise in the file means no section, never an error."""
+    path = Path(project_dir) / "graphify-out" / "graph.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        nodes = [n for n in data["nodes"] if isinstance(n, dict)]
+        links = [e for e in data.get("links", []) if isinstance(e, dict)]
+        if not nodes:
+            return []
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    try:
+        labels = json.loads((path.parent / ".graphify_labels.json")
+                            .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        labels = {}
+    degree: dict = {}
+    for e in links:
+        for end in (e.get("source"), e.get("target")):
+            if end is not None:
+                degree[end] = degree.get(end, 0) + 1
+    members: dict = {}
+    for n in nodes:
+        if n.get("community") is not None:
+            members.setdefault(n["community"], []).append(n)
+    note = "built " + time.strftime("%Y-%m-%d",
+                                    time.localtime(path.stat().st_mtime))
+    commit = data.get("built_at_commit")
+    if commit:
+        shas = [sha for _, sha, _ in _git_reflog(project_dir)]
+        if commit in shas:
+            behind = len(shas) - 1 - shas.index(commit)
+            if behind:
+                note += f", {behind} commit(s) behind HEAD"
+    out = ["", "## Code map", "",
+           f"_Knowledge graph: {len(nodes)} nodes, {len(links)} edges, "
+           f"{len(members)} communities (graphify, {note})._", ""]
+    ranked = sorted(members.items(),
+                    key=lambda kv: (-len(kv[1]), str(kv[0])))
+    hub_names, titles = {}, {}
+    for cid, group in ranked:
+        hubs = sorted(group, key=lambda n: (-degree.get(n.get("id"), 0),
+                                            str(n.get("label", ""))))
+        hub_names[cid] = [str(h.get("label") or h.get("id") or "?")
+                          for h in hubs[:2]]
+        titles[cid] = labels.get(str(cid)) or hub_names[cid][0]
+    for cid, group in ranked[:CODE_MAP_CAP]:
+        plural = "s" if len(group) != 1 else ""
+        out.append(f"- **{titles[cid]}** ({len(group)} node{plural}) — "
+                   + ", ".join(hub_names[cid]))
+    if len(ranked) > CODE_MAP_CAP:
+        out.append(f"- …{len(ranked) - CODE_MAP_CAP} more")
+    out += _code_bridges(nodes, links, degree, titles)
+    out += _code_flows(data.get("hyperedges") or [], nodes)
+    return out
+
+
 def build_brief_deterministic(parsed_list: list, label: str) -> str:
     """No-LLM digest: timeline of every session + cross-session activity.
     The --llm variant distills decisions/conventions; this is the honest,
@@ -158,6 +263,7 @@ def build_brief_deterministic(parsed_list: list, label: str) -> str:
         out += ["", "## Most-touched files", ""]
         out += [f"- `{f}`" + (f" ({n}× edits)" if n > 1 else "")
                 for f, n in rollup]
+    out += _code_map(label)
     return "\n".join(out) + "\n"
 
 
@@ -585,12 +691,13 @@ def graft_distilled(old: str, doc: str, stamp: dict, label: str,
     return doc + distilled
 
 
-def update_brief_skeleton(project: str) -> bool:
+def update_brief_skeleton(project: str):
     """SessionEnd refresh: rebuild the factual skeleton of an EXISTING
-    stamped brief, preserving the distilled section with a freshness note.
-    Touches nothing (returns False) for missing or unstamped files and
-    empty projects — the hook must never create surprises, and building a
-    brief is always an explicit user command."""
+    stamped brief, preserving the distilled section with a freshness
+    note. Returns the written text (so the caller can sync in-project
+    mirrors) — or False, touching nothing, for missing or unstamped
+    files and empty projects: the hook must never create surprises, and
+    building a brief is always an explicit user command."""
     path = brief_path(project)
     if not path.is_file():
         return False
@@ -610,5 +717,6 @@ def update_brief_skeleton(project: str) -> bool:
                            stamp["distilled_sessions"], stamp["provider"],
                            exclude=",".join(stamp["exclude"]),
                            keep=stamp["keep"])
-    path.write_text(new_stamp + "\n" + doc, encoding="utf-8")
-    return True
+    text = new_stamp + "\n" + doc
+    path.write_text(text, encoding="utf-8")
+    return text

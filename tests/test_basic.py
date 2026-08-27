@@ -1923,6 +1923,78 @@ class BriefExcludeTests(unittest.TestCase):
                 self._run(td, ["--exclude"])
         self.assertIn("terminal", str(cm.exception))
 
+    def test_bare_exclude_remembers_stored_set_on_empty_input(self):
+        # the picker pre-selects the stamp's exclusions (✗ marker) and
+        # empty input KEEPS them — it edits the sticky set, never
+        # silently replaces it with nothing
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._run(td, ["--exclude", "abc123"])
+            with unittest.mock.patch.object(ch.sys.stdin, "isatty",
+                                            lambda: True), \
+                    unittest.mock.patch("builtins.input",
+                                        side_effect=[""]):
+                text, err = self._run(td, ["--exclude"])
+        self.assertRegex(err, r"✗[^\n]*abc123")        # marked in the list
+        self.assertNotRegex(err, r"✗[^\n]*agent-se")   # others unmarked
+        self.assertNotIn("Fix login bug", text)        # still excluded
+        self.assertIn("exclude=abc123", text)          # still stamped
+
+    def test_bare_exclude_toggle_removes_preselected(self):
+        # typing a pre-selected number un-excludes it
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._run(td, ["--exclude", "abc123"])
+            with unittest.mock.patch.object(ch.sys.stdin, "isatty",
+                                            lambda: True), \
+                    unittest.mock.patch("builtins.input",
+                                        side_effect=["1"]):
+                text, _ = self._run(td, ["--exclude"])
+        self.assertIn("Fix login bug", text)           # back in the brief
+        self.assertNotIn("exclude=", text)             # stamp cleared
+
+    def test_bare_exclude_toggle_adds_without_retyping(self):
+        # with a stored exclusion, typing only the NEW number keeps the
+        # old one too — no need to re-pick the whole set
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            buf = io.StringIO()
+            with unittest.mock.patch.object(
+                    ch.brief, "find_sessions",
+                    lambda *a, **k: [FIXTURE, AGENT_SESSION, NOTIF]), \
+                    unittest.mock.patch.object(
+                        ch.cli, "cwd_project_filter",
+                        lambda *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                               Path(td)), \
+                    contextlib.redirect_stderr(buf):
+                ch.main(["--brief", "--exclude", "abc123"])
+                with unittest.mock.patch.object(ch.sys.stdin, "isatty",
+                                                lambda: True), \
+                        unittest.mock.patch("builtins.input",
+                                            side_effect=["3"]):
+                    ch.main(["--brief", "--exclude"])
+            text = (Path(td) / "-home-vspapg-myapp.md").read_text(
+                encoding="utf-8")
+        self.assertNotIn("Fix login bug", text)        # old kept out
+        self.assertIn("Parallel refactor", text)       # untouched one in
+        self.assertRegex(text,                         # both stamped
+                         r"exclude=(abc123,n1|n1,abc123)")
+
+    def test_none_in_picker_clears_everything(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._run(td, ["--exclude", "abc123"])
+            with unittest.mock.patch.object(ch.sys.stdin, "isatty",
+                                            lambda: True), \
+                    unittest.mock.patch("builtins.input",
+                                        side_effect=["none"]):
+                text, _ = self._run(td, ["--exclude"])
+        self.assertIn("Fix login bug", text)           # everything back
+        self.assertNotIn("exclude=", text)
+
     def test_keep_window_first_and_last(self):
         # --keep first:2,last:3 → founding sessions + recent window,
         # chronological, overlap deduped; bare N means last:N
@@ -2829,6 +2901,461 @@ class EmailNoticeTests(unittest.TestCase):
             with contextlib.redirect_stderr(buf):
                 ch.main([str(FIXTURE), "-o", str(out)])
         self.assertNotIn("--anonymize", buf.getvalue())
+
+
+class GraphifyCorpusTests(unittest.TestCase):
+    """-o graphify drops the redacted document into ./raw — graphify's
+    ingest folder — so the next /graphify --update merges session memory
+    into the project's knowledge graph."""
+
+    def _chdir(self, td):
+        prev = os.getcwd()
+        os.chdir(td)
+        self.addCleanup(os.chdir, prev)
+
+    def test_handoff_o_graphify_writes_session_file(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._chdir(td)
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                ch.main([str(FIXTURE), "-o", "graphify"])
+            out = Path(td) / "raw" / "session-abc123.md"
+            self.assertTrue(out.exists())
+            text = out.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("---\n"))     # frontmatter first
+            front = text.split("---", 2)[1]
+            self.assertIn("captured_at:", front)
+            self.assertIn("contributor: claude-handoff", front)
+            self.assertIn("abc123", front)                # session provenance
+            self.assertIn("Fix login bug", text)          # handoff body follows
+        self.assertIn("graphify --update", buf.getvalue())  # next-step hint
+
+    def test_brief_o_graphify_carries_distillation_store_untouched(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+                tempfile.TemporaryDirectory() as proj:
+            old = ("<!-- claude-handoff-brief v=1 built=10 sessions=1 "
+                   "newest_mtime=10 distilled=10 distilled_sessions=1 "
+                   "provider=claude-cli -->\n"
+                   "# Project brief: old\n\n## Session timeline\n\n- old\n\n"
+                   "## Distilled memory\n\n- Redis for drafts [abc123]\n")
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                old, encoding="utf-8")
+            self._chdir(proj)
+            with unittest.mock.patch.object(
+                    ch.brief, "find_sessions",
+                    lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(
+                        ch.cli, "cwd_project_filter",
+                        lambda *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                               Path(td)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.main(["--brief", "-o", "graphify"])
+            out = Path(proj) / "raw" / "project-memory.md"
+            self.assertTrue(out.exists())
+            text = out.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("---\n"))
+            self.assertIn("- Redis for drafts [abc123]", text)  # distilled
+            self.assertIn("Fix login bug", text)          # fresh skeleton
+            stored = (Path(td) / "-home-vspapg-myapp.md").read_text(
+                encoding="utf-8")
+            self.assertEqual(stored, old)                 # store untouched
+
+    def test_graphify_warns_when_raw_not_gitignored(self):
+        import contextlib
+        import io
+        import tempfile
+        prev = os.getcwd()
+        self.addCleanup(os.chdir, prev)
+        with tempfile.TemporaryDirectory() as td:      # repo, no .gitignore
+            os.chdir(td)
+            (Path(td) / ".git").mkdir()
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                ch.main([str(FIXTURE), "-o", "graphify"])
+            os.chdir(prev)                # leave td before its cleanup
+            self.assertIn(".gitignore", buf.getvalue())
+        with tempfile.TemporaryDirectory() as td:      # raw/ ignored → quiet
+            os.chdir(td)
+            (Path(td) / ".git").mkdir()
+            (Path(td) / ".gitignore").write_text("raw/\n", encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                ch.main([str(FIXTURE), "-o", "graphify"])
+            os.chdir(prev)
+            self.assertNotIn(".gitignore", buf.getvalue())
+
+    def test_brief_grep_o_graphify_is_a_loud_error(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._chdir(td)
+            with unittest.mock.patch.object(
+                    ch.brief, "find_sessions", lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(
+                        ch.cli, "cwd_project_filter",
+                        lambda *a, **k: "-home-vspapg-myapp"):
+                with self.assertRaises(SystemExit) as cm:
+                    ch.main(["--brief", "--grep", "login", "-o", "graphify"])
+            self.assertIn("project-memory", str(cm.exception))
+
+
+class CodeMapTests(unittest.TestCase):
+    """A graphify knowledge graph next to the project (graphify-out/
+    graph.json) gives the deterministic brief a ## Code map section —
+    free, automatic, silent no-op when absent."""
+
+    def _graph(self, td, built_at_commit=None, labels=True,
+               hyperedges=None):
+        gout = Path(td) / "graphify-out"
+        gout.mkdir(parents=True, exist_ok=True)
+        data = {"directed": False, "multigraph": False, "graph": {},
+                "nodes": [
+                    {"id": "a1", "label": "LoginGate", "community": 0},
+                    {"id": "a2", "label": "TokenStore", "community": 0},
+                    {"id": "a3", "label": "SessionCheck", "community": 0},
+                    {"id": "d1", "label": "PoolConnect", "community": 1},
+                    {"id": "d2", "label": "PoolManager", "community": 1}],
+                "links": [
+                    {"source": "a1", "target": "a2"},
+                    {"source": "a1", "target": "a3"},
+                    {"source": "a1", "target": "d1",
+                     "relation": "calls"},
+                    {"source": "d1", "target": "d2"}],
+                "hyperedges": hyperedges or []}
+        if built_at_commit:
+            data["built_at_commit"] = built_at_commit
+        (gout / "graph.json").write_text(json.dumps(data), encoding="utf-8")
+        if labels:
+            (gout / ".graphify_labels.json").write_text(
+                json.dumps({"0": "Auth Flow", "1": "Database Layer"}),
+                encoding="utf-8")
+
+    def _fake_repo(self, td, entries):
+        logs = Path(td) / ".git" / "logs"
+        logs.mkdir(parents=True)
+        lines = [f"{'0' * 40} {sha} You <y@x> {ts} +0200\tcommit: {subject}"
+                 for ts, sha, subject in entries]
+        (logs / "HEAD").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_brief_gains_code_map_from_graph(self):
+        import tempfile
+        import time
+        parsed = ch.parse_session(FIXTURE)
+        with tempfile.TemporaryDirectory() as td:
+            self._graph(td)
+            doc = ch.brief.build_brief_deterministic([parsed], td)
+        self.assertIn("## Code map", doc)
+        self.assertIn("5 nodes", doc)
+        self.assertIn("4 edges", doc)
+        self.assertIn("2 communities", doc)
+        self.assertIn("built " + time.strftime("%Y-%m-%d"), doc)
+        self.assertRegex(doc, r"- \*\*Auth Flow\*\* \(3 nodes\)[^\n]*LoginGate")
+        self.assertRegex(doc,
+                         r"- \*\*Database Layer\*\* \(2 nodes\)[^\n]*"
+                         r"PoolConnect")
+        # biggest community first
+        self.assertLess(doc.index("Auth Flow"), doc.index("Database Layer"))
+
+    def test_no_graph_no_section(self):
+        parsed = ch.parse_session(FIXTURE)
+        doc = ch.brief.build_brief_deterministic([parsed], "home/x/nope")
+        self.assertNotIn("## Code map", doc)
+
+    def test_malformed_graph_is_tolerated(self):
+        import tempfile
+        parsed = ch.parse_session(FIXTURE)
+        with tempfile.TemporaryDirectory() as td:
+            gout = Path(td) / "graphify-out"
+            gout.mkdir(parents=True)
+            (gout / "graph.json").write_text("{not json", encoding="utf-8")
+            doc = ch.brief.build_brief_deterministic([parsed], td)
+        self.assertNotIn("## Code map", doc)
+        self.assertIn("## Session timeline", doc)      # brief still builds
+
+    def test_missing_labels_fall_back_to_hub_label(self):
+        import tempfile
+        parsed = ch.parse_session(FIXTURE)
+        with tempfile.TemporaryDirectory() as td:
+            self._graph(td, labels=False)
+            doc = ch.brief.build_brief_deterministic([parsed], td)
+        self.assertIn("## Code map", doc)
+        self.assertRegex(doc, r"- \*\*LoginGate\*\* \(3 nodes\)")
+
+    def test_code_map_caps_listed_communities(self):
+        import tempfile
+        parsed = ch.parse_session(FIXTURE)
+        with tempfile.TemporaryDirectory() as td:
+            gout = Path(td) / "graphify-out"
+            gout.mkdir(parents=True)
+            data = {"nodes": [{"id": f"n{i}", "label": f"Node{i}",
+                               "community": i} for i in range(8)],
+                    "links": []}
+            (gout / "graph.json").write_text(json.dumps(data),
+                                             encoding="utf-8")
+            (gout / ".graphify_labels.json").write_text(
+                json.dumps({str(i): f"L{i}" for i in range(8)}),
+                encoding="utf-8")
+            doc = ch.brief.build_brief_deterministic([parsed], td)
+        self.assertIn("**L0**", doc)
+        self.assertIn("**L5**", doc)
+        self.assertNotIn("**L6**", doc)                # capped at 6
+        self.assertIn("2 more", doc)
+        self.assertNotIn("bridges:", doc)              # no links → no
+        self.assertNotIn("flows:", doc)                # knowledge lines
+
+    def test_code_map_counts_commits_behind_graph_build(self):
+        import tempfile
+        parsed = ch.parse_session(FIXTURE)
+        with tempfile.TemporaryDirectory() as td:
+            self._fake_repo(td, [(1000, "a" * 40, "init"),
+                                 (2000, "b" * 40, "two"),
+                                 (3000, "c" * 40, "three")])
+            self._graph(td, built_at_commit="a" * 40)
+            doc = ch.brief.build_brief_deterministic([parsed], td)
+        self.assertIn("2 commit(s) behind", doc)
+
+    def test_code_map_lists_cross_community_bridges(self):
+        # the a1—d1 `calls` link is the only edge crossing communities —
+        # named with both endpoints, the relation and the two communities
+        import tempfile
+        parsed = ch.parse_session(FIXTURE)
+        with tempfile.TemporaryDirectory() as td:
+            self._graph(td)
+            doc = ch.brief.build_brief_deterministic([parsed], td)
+        self.assertRegex(doc, r"bridges: LoginGate —calls→ PoolConnect "
+                              r"\(Auth Flow ↔ Database Layer\)")
+
+    def test_code_map_lists_flows_from_hyperedges(self):
+        import tempfile
+        parsed = ch.parse_session(FIXTURE)
+        with tempfile.TemporaryDirectory() as td:
+            self._graph(td, hyperedges=[
+                {"id": "auth_flow", "label": "Authentication flow",
+                 "nodes": ["a1", "a2", "a3"]}])
+            doc = ch.brief.build_brief_deterministic([parsed], td)
+        self.assertRegex(doc, r"flows: Authentication flow "
+                              r"\(LoginGate, TokenStore, SessionCheck\)")
+
+
+class BriefMirrorTests(unittest.TestCase):
+    """In-project copies of the brief — raw/project-memory.md (graphify
+    corpus) and BRIEF.md (human/git) — refresh whenever the STORE brief
+    is (re)written, and are never created by a refresh."""
+
+    def test_sync_refreshes_only_existing_copies(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as proj:
+            root = Path(proj)
+            # nothing exists → nothing created, nothing synced
+            self.assertEqual(
+                ch.integrations.sync_brief_mirrors(root, "DOC"), [])
+            self.assertFalse((root / "raw").exists())
+            self.assertFalse((root / "BRIEF.md").exists())
+            # corpus copy exists → refreshed WITH frontmatter
+            (root / "raw").mkdir()
+            (root / "raw" / "project-memory.md").write_text(
+                "old", encoding="utf-8")
+            synced = ch.integrations.sync_brief_mirrors(root, "# fresh\n")
+            self.assertEqual(len(synced), 1)
+            text = (root / "raw" / "project-memory.md").read_text(
+                encoding="utf-8")
+            self.assertTrue(text.startswith("---\n"))
+            self.assertIn("# fresh", text)
+            self.assertFalse((root / "BRIEF.md").exists())  # not created
+            # human copy exists too → refreshed VERBATIM (no frontmatter)
+            (root / "BRIEF.md").write_text("old", encoding="utf-8")
+            synced = ch.integrations.sync_brief_mirrors(root, "# fresher\n")
+            self.assertEqual(len(synced), 2)
+            self.assertEqual((root / "BRIEF.md").read_text(encoding="utf-8"),
+                             "# fresher\n")
+
+    def test_plain_brief_syncs_mirrors_and_exports_do_not(self):
+        import contextlib
+        import io
+        import tempfile
+        calls = []
+        with tempfile.TemporaryDirectory() as td:
+            patches = (
+                unittest.mock.patch.object(
+                    ch.brief, "find_sessions", lambda *a, **k: [FIXTURE]),
+                unittest.mock.patch.object(
+                    ch.cli, "cwd_project_filter",
+                    lambda *a, **k: "-home-vspapg-myapp"),
+                unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                           Path(td)),
+                unittest.mock.patch.object(
+                    ch.cli, "sync_brief_mirrors",
+                    lambda root, doc: calls.append((str(root), doc)) or []),
+                unittest.mock.patch.object(ch.cli, "_copy_clipboard",
+                                           lambda doc: "pbcopy"),
+                contextlib.redirect_stderr(io.StringIO()),
+            )
+            with contextlib.ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                ch.main(["--brief"])                 # store write → sync
+                self.assertEqual(len(calls), 1)
+                root, doc = calls[0]
+                self.assertEqual(root, "/home/vspapg/myapp")   # the label
+                self.assertIn("claude-handoff-brief v=1", doc)  # stamped
+                ch.main(["--brief", "-o", "clipboard"])   # export → no sync
+                self.assertEqual(len(calls), 1)
+
+    def test_hook_update_refreshes_existing_project_copies(self):
+        import contextlib
+        import io
+        import tempfile
+        old = ("<!-- claude-handoff-brief v=1 built=10 sessions=1 "
+               "newest_mtime=10 distilled=10 distilled_sessions=1 "
+               "provider=claude-cli -->\n"
+               "# Project brief: old\n\n## Session timeline\n\n- old\n\n"
+               "## Distilled memory\n\n- Redis for drafts [abc123]\n")
+        with tempfile.TemporaryDirectory() as td, \
+                tempfile.TemporaryDirectory() as proj:
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                old, encoding="utf-8")
+            (Path(proj) / "raw").mkdir()
+            (Path(proj) / "raw" / "project-memory.md").write_text(
+                "stale", encoding="utf-8")
+            (Path(proj) / "BRIEF.md").write_text("stale", encoding="utf-8")
+            payload = json.dumps({"cwd": proj})
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.brief, "find_sessions",
+                        lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "cwd_project_filter",
+                        lambda cwd=None, *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(sys, "stdin",
+                                               io.StringIO(payload)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.run_brief_update_mode()
+            store = (Path(td) / "-home-vspapg-myapp.md").read_text(
+                encoding="utf-8")
+            corpus = (Path(proj) / "raw" / "project-memory.md").read_text(
+                encoding="utf-8")
+            mirror = (Path(proj) / "BRIEF.md").read_text(encoding="utf-8")
+        self.assertIn("Fix login bug", store)           # skeleton refreshed
+        self.assertTrue(corpus.startswith("---\n"))     # frontmatter kept
+        self.assertIn("Fix login bug", corpus)
+        self.assertIn("- Redis for drafts [abc123]", corpus)  # distilled
+        self.assertEqual(mirror, store)                 # exact store copy
+
+    def test_hook_update_never_creates_copies(self):
+        import contextlib
+        import io
+        import tempfile
+        old = ("<!-- claude-handoff-brief v=1 built=10 sessions=1 "
+               "newest_mtime=10 distilled=0 distilled_sessions=0 "
+               "provider=none -->\n# Project brief: old\n")
+        with tempfile.TemporaryDirectory() as td, \
+                tempfile.TemporaryDirectory() as proj:
+            (Path(td) / "-home-vspapg-myapp.md").write_text(
+                old, encoding="utf-8")
+            payload = json.dumps({"cwd": proj})
+            with unittest.mock.patch.object(ch.brief, "BRIEFS_DIR",
+                                            Path(td)), \
+                    unittest.mock.patch.object(
+                        ch.brief, "find_sessions",
+                        lambda *a, **k: [FIXTURE]), \
+                    unittest.mock.patch.object(
+                        ch.integrations, "cwd_project_filter",
+                        lambda cwd=None, *a, **k: "-home-vspapg-myapp"), \
+                    unittest.mock.patch.object(sys, "stdin",
+                                               io.StringIO(payload)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.run_brief_update_mode()
+            self.assertFalse((Path(proj) / "raw").exists())
+            self.assertFalse((Path(proj) / "BRIEF.md").exists())
+
+
+class SkillInstallTests(unittest.TestCase):
+    GRAPHIFY_SECTION = (
+        "# graphify\n"
+        "- **graphify** - any input to knowledge graph. Trigger: `/graphify`\n"
+        "When the user types `/graphify`, invoke the Skill tool.\n")
+
+    def test_install_writes_skill_and_registers_trigger_once(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            skills = Path(td) / "skills"
+            cmd = Path(td) / "CLAUDE.md"
+            with contextlib.redirect_stderr(io.StringIO()):
+                ch.install_skill(skills_dir=skills, claude_md=cmd)
+                ch.install_skill(skills_dir=skills, claude_md=cmd)  # idempotent
+            skill = skills / "claude-handoff" / "SKILL.md"
+            self.assertEqual(skill.read_text(encoding="utf-8"), ch.SKILL_MD)
+            text = cmd.read_text(encoding="utf-8")
+            self.assertEqual(text.splitlines().count("# claude-handoff"), 1)
+            self.assertIn('`skill: "claude-handoff"`', text)
+
+    def test_install_uninstall_round_trip_preserves_claude_md(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            skills = Path(td) / "skills"
+            cmd = Path(td) / "CLAUDE.md"
+            cmd.write_text(self.GRAPHIFY_SECTION, encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                ch.install_skill(skills_dir=skills, claude_md=cmd)
+            text = cmd.read_text(encoding="utf-8")
+            self.assertIn("# graphify", text)
+            self.assertIn("# claude-handoff", text)
+            with contextlib.redirect_stderr(io.StringIO()):
+                ch.install_skill(skills_dir=skills, claude_md=cmd,
+                                 remove=True)
+            self.assertEqual(cmd.read_text(encoding="utf-8"),
+                             self.GRAPHIFY_SECTION)
+            skill = skills / "claude-handoff" / "SKILL.md"
+            self.assertFalse(skill.exists())
+            self.assertFalse(skill.parent.exists())   # empty dir pruned
+
+    def test_uninstall_without_install_is_harmless(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            skills = Path(td) / "skills"
+            cmd = Path(td) / "CLAUDE.md"
+            with contextlib.redirect_stderr(io.StringIO()):
+                ch.install_skill(skills_dir=skills, claude_md=cmd,
+                                 remove=True)
+            self.assertFalse(cmd.exists())            # never created
+
+    def test_repo_skill_copy_matches_embedded_doc(self):
+        repo = (Path(__file__).resolve().parent.parent
+                / "skills" / "claude-handoff" / "SKILL.md")
+        self.assertEqual(repo.read_text(encoding="utf-8"), ch.SKILL_MD)
+
+    def test_skill_doc_pins_the_critical_rules(self):
+        for needle in ("--llm claude-cli", "-o clipboard", "--no-redact",
+                       "NEVER use `-i`"):
+            self.assertIn(needle, ch.SKILL_MD)
+
+    def test_cli_flags_dispatch_to_installer(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            env = {"CLAUDE_HOME": td,
+                   "CLAUDE_HANDOFF_CONFIG": str(Path(td) / "no-config.json")}
+            with unittest.mock.patch.dict(os.environ, env), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                ch.cli.main(["--install-skill"])
+                path = Path(td) / "skills" / "claude-handoff" / "SKILL.md"
+                self.assertTrue(path.is_file())
+                ch.cli.main(["--uninstall-skill"])
+                self.assertFalse(path.exists())
 
 
 if __name__ == "__main__":

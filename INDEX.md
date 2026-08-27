@@ -12,7 +12,7 @@ claude-handoff/
 │   ├── llm.py             ← provider registry, map-reduce, cache, progress
 │   ├── brief.py           ← --brief: whole-project memory (timeline + LLM
 │   │                        distillation, cached per session)
-│   ├── integrations.py    ← clipboard, MCP server, SessionEnd hook
+│   ├── integrations.py    ← clipboard, graphify corpus, MCP server, hooks
 │   ├── cli.py             ← argparse, source resolution, main
 │   └── _version.py / __init__.py / __main__.py
 ├── single/
@@ -20,6 +20,11 @@ claude-handoff/
 │                            (scripts/build_single.py; CI keeps it fresh)
 ├── scripts/
 │   └── build_single.py    ← stitches the package into single/…, --check mode
+├── skills/
+│   └── claude-handoff/
+│       └── SKILL.md       ← the /claude-handoff Claude Code skill
+│                            (--install-skill; embedded as SKILL_MD in
+│                            integrations.py, pinned byte-identical)
 ├── README.md              ← 60-second scenarios, install, project memory,
 │                            recipes, privacy, troubleshooting, full flag
 │                            reference, comparison, roadmap

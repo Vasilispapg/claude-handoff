@@ -8,3 +8,9 @@ err.log
 
 # internal research notes — not part of the published repo
 docs/RESEARCH.md
+
+# personal session memory (graphify corpus) — never committed
+raw/
+
+# graphify knowledge graph (derived from raw/ session memory) — local only
+graphify-out/

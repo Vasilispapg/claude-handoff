@@ -2031,6 +2031,110 @@ def _commit_bullets(commits: list) -> str:
     return out
 
 
+CODE_MAP_CAP = 6             # communities listed in the code map
+BRIDGE_CAP = 3               # bridges / flows listed in the code map
+
+
+def _code_bridges(nodes: list, links: list, degree: dict,
+                  titles: dict) -> list:
+    """One `bridges:` line naming the strongest links that cross
+    community boundaries — where the subsystems actually touch."""
+    comm = {n.get("id"): n.get("community") for n in nodes}
+    label = {n.get("id"): str(n.get("label") or n.get("id") or "?")
+             for n in nodes}
+    cross = [e for e in links
+             if comm.get(e.get("source")) is not None
+             and comm.get(e.get("target")) is not None
+             and comm[e["source"]] != comm[e["target"]]]
+    cross.sort(key=lambda e: (-(degree.get(e["source"], 0)
+                                + degree.get(e["target"], 0)),
+                              str(e["source"])))
+    parts = []
+    for e in cross[:BRIDGE_CAP]:
+        rel = str(e.get("relation") or "").strip()
+        arrow = f"—{rel}→" if rel else "→"
+        parts.append(f"{label[e['source']]} {arrow} {label[e['target']]} "
+                     f"({titles.get(comm[e['source']], '?')} ↔ "
+                     f"{titles.get(comm[e['target']], '?')})")
+    return ["- bridges: " + "; ".join(parts)] if parts else []
+
+
+def _code_flows(hyperedges: list, nodes: list) -> list:
+    """One `flows:` line for the labeled multi-node patterns graphify
+    found (hyperedges) — flows, protocols, shared concepts."""
+    label = {n.get("id"): str(n.get("label") or n.get("id") or "?")
+             for n in nodes}
+    flows = [h for h in hyperedges
+             if isinstance(h, dict) and h.get("label") and h.get("nodes")]
+    flows.sort(key=lambda h: (-len(h["nodes"]), str(h["label"])))
+    parts = []
+    for h in flows[:BRIDGE_CAP]:
+        shown = ", ".join(label.get(i, str(i)) for i in h["nodes"][:5])
+        parts.append(f"{h['label']} ({shown})")
+    return ["- flows: " + "; ".join(parts)] if parts else []
+
+
+def _code_map(project_dir) -> list:
+    """`## Code map` lines from a graphify knowledge graph
+    (`graphify-out/graph.json`, networkx node-link JSON) sitting next to
+    the project — the brief then carries the code's structure, not just
+    its history. Free and automatic; tolerant like the git helpers: any
+    surprise in the file means no section, never an error."""
+    path = Path(project_dir) / "graphify-out" / "graph.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        nodes = [n for n in data["nodes"] if isinstance(n, dict)]
+        links = [e for e in data.get("links", []) if isinstance(e, dict)]
+        if not nodes:
+            return []
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    try:
+        labels = json.loads((path.parent / ".graphify_labels.json")
+                            .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        labels = {}
+    degree: dict = {}
+    for e in links:
+        for end in (e.get("source"), e.get("target")):
+            if end is not None:
+                degree[end] = degree.get(end, 0) + 1
+    members: dict = {}
+    for n in nodes:
+        if n.get("community") is not None:
+            members.setdefault(n["community"], []).append(n)
+    note = "built " + time.strftime("%Y-%m-%d",
+                                    time.localtime(path.stat().st_mtime))
+    commit = data.get("built_at_commit")
+    if commit:
+        shas = [sha for _, sha, _ in _git_reflog(project_dir)]
+        if commit in shas:
+            behind = len(shas) - 1 - shas.index(commit)
+            if behind:
+                note += f", {behind} commit(s) behind HEAD"
+    out = ["", "## Code map", "",
+           f"_Knowledge graph: {len(nodes)} nodes, {len(links)} edges, "
+           f"{len(members)} communities (graphify, {note})._", ""]
+    ranked = sorted(members.items(),
+                    key=lambda kv: (-len(kv[1]), str(kv[0])))
+    hub_names, titles = {}, {}
+    for cid, group in ranked:
+        hubs = sorted(group, key=lambda n: (-degree.get(n.get("id"), 0),
+                                            str(n.get("label", ""))))
+        hub_names[cid] = [str(h.get("label") or h.get("id") or "?")
+                          for h in hubs[:2]]
+        titles[cid] = labels.get(str(cid)) or hub_names[cid][0]
+    for cid, group in ranked[:CODE_MAP_CAP]:
+        plural = "s" if len(group) != 1 else ""
+        out.append(f"- **{titles[cid]}** ({len(group)} node{plural}) — "
+                   + ", ".join(hub_names[cid]))
+    if len(ranked) > CODE_MAP_CAP:
+        out.append(f"- …{len(ranked) - CODE_MAP_CAP} more")
+    out += _code_bridges(nodes, links, degree, titles)
+    out += _code_flows(data.get("hyperedges") or [], nodes)
+    return out
+
+
 def build_brief_deterministic(parsed_list: list, label: str) -> str:
     """No-LLM digest: timeline of every session + cross-session activity.
     The --llm variant distills decisions/conventions; this is the honest,
@@ -2061,6 +2165,7 @@ def build_brief_deterministic(parsed_list: list, label: str) -> str:
         out += ["", "## Most-touched files", ""]
         out += [f"- `{f}`" + (f" ({n}× edits)" if n > 1 else "")
                 for f, n in rollup]
+    out += _code_map(label)
     return "\n".join(out) + "\n"
 
 
@@ -2488,12 +2593,13 @@ def graft_distilled(old: str, doc: str, stamp: dict, label: str,
     return doc + distilled
 
 
-def update_brief_skeleton(project: str) -> bool:
+def update_brief_skeleton(project: str):
     """SessionEnd refresh: rebuild the factual skeleton of an EXISTING
-    stamped brief, preserving the distilled section with a freshness note.
-    Touches nothing (returns False) for missing or unstamped files and
-    empty projects — the hook must never create surprises, and building a
-    brief is always an explicit user command."""
+    stamped brief, preserving the distilled section with a freshness
+    note. Returns the written text (so the caller can sync in-project
+    mirrors) — or False, touching nothing, for missing or unstamped
+    files and empty projects: the hook must never create surprises, and
+    building a brief is always an explicit user command."""
     path = brief_path(project)
     if not path.is_file():
         return False
@@ -2513,8 +2619,9 @@ def update_brief_skeleton(project: str) -> bool:
                            stamp["distilled_sessions"], stamp["provider"],
                            exclude=",".join(stamp["exclude"]),
                            keep=stamp["keep"])
-    path.write_text(new_stamp + "\n" + doc, encoding="utf-8")
-    return True
+    text = new_stamp + "\n" + doc
+    path.write_text(text, encoding="utf-8")
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -2532,6 +2639,77 @@ def _copy_clipboard(text: str) -> str:
                 return cmd[0]
     raise SystemExit("No clipboard tool found — expected pbcopy (macOS), "
                      "wl-copy/xclip (Linux) or clip (Windows).")
+
+
+# ------------------------------------------------------------------------- #
+#  graphify corpus export (-o graphify)
+# ------------------------------------------------------------------------- #
+
+GRAPHIFY_RAW_DIR = "raw"        # graphify's ingest-folder convention
+
+
+def _warn_raw_unignored(root: Path) -> None:
+    """One-line heads-up when ./raw would be committed with the repo —
+    session memory landing in version control is egress too."""
+    if not (root / ".git").exists():
+        return
+    try:
+        lines = {ln.strip() for ln in (root / ".gitignore")
+                 .read_text(encoding="utf-8").splitlines()}
+    except OSError:
+        lines = set()
+    if not lines & {"raw", "raw/", "/raw", "/raw/"}:
+        print(f"ℹ {GRAPHIFY_RAW_DIR}/ is not in .gitignore — session "
+              f"memory will be committed with the repo unless you add it.",
+              file=sys.stderr)
+
+
+def write_graphify_corpus(doc: str, kind: str,
+                          session_id: str | None = None,
+                          root: Path | None = None) -> Path:
+    """Drop a (redacted) document into ./raw — graphify's ingest folder —
+    so the next `/graphify --update` merges session memory into the
+    project's knowledge graph. The YAML frontmatter carries the fields
+    graphify copies onto every extracted node (captured_at / source_url /
+    contributor). The brief is ONE evolving file (overwritten, so the
+    graph always holds the current state); handoffs are per-session."""
+    root = Path(root) if root else Path(".")
+    dest = root / GRAPHIFY_RAW_DIR
+    dest.mkdir(parents=True, exist_ok=True)
+    name = ("project-memory.md" if kind == "brief"
+            else f"session-{(session_id or 'handoff')[:8]}.md")
+    front = ["---",
+             "captured_at: " + datetime.now().astimezone()
+             .isoformat(timespec="seconds")]
+    if session_id:
+        front.append(f"source_url: claude-code-session://{session_id}")
+    front += ["contributor: claude-handoff", "---", "", ""]
+    out = dest / name
+    out.write_text("\n".join(front) + doc, encoding="utf-8")
+    _warn_raw_unignored(root)
+    return out
+
+
+BRIEF_MIRROR_NAME = "BRIEF.md"
+
+
+def sync_brief_mirrors(root: Path, doc: str) -> list:
+    """Refresh the in-project copies of the brief that ALREADY exist —
+    `raw/project-memory.md` (graphify corpus, fresh frontmatter) and
+    `BRIEF.md` (plain human/git copy at the project root). Never creates
+    either: opting in is creating the file once (`chf --brief -o
+    graphify`, or `touch BRIEF.md`); deleting it opts out. Runs whenever
+    the STORE brief is (re)written — explicit runs and hook refreshes
+    alike, so the hook only ever updates files the user chose to have."""
+    root = Path(root)
+    synced = []
+    if (root / GRAPHIFY_RAW_DIR / "project-memory.md").is_file():
+        synced.append(write_graphify_corpus(doc, "brief", root=root))
+    mirror = root / BRIEF_MIRROR_NAME
+    if mirror.is_file():
+        mirror.write_text(doc, encoding="utf-8")
+        synced.append(mirror)
+    return synced
 
 
 # ------------------------------------------------------------------------- #
@@ -2871,10 +3049,211 @@ def run_brief_update_mode() -> None:
         payload = json.load(sys.stdin)
         project = cwd_project_filter(Path(payload["cwd"]))
         if project:
-            update_brief_skeleton(project)
+            doc = update_brief_skeleton(project)
+            if doc:
+                sync_brief_mirrors(Path(payload["cwd"]), doc)
     except Exception as e:  # never fatal — but say what happened
         warn("brief update hook", e)
         return
+
+
+# ------------------------------------------------------------------------- #
+#  Claude Code skill (claude-handoff --install-skill)
+# ------------------------------------------------------------------------- #
+
+SKILL_TRIGGER_BLOCK = (
+    "# claude-handoff\n"
+    "- **claude-handoff** (`~/.claude/skills/claude-handoff/SKILL.md`) - "
+    "session handoffs & project memory from Claude Code history (chf). "
+    "Trigger: `/claude-handoff`\n"
+    "When the user types `/claude-handoff`, invoke the Skill tool with "
+    "`skill: \"claude-handoff\"` before doing anything else.\n")
+
+SKILL_MD = """---
+name: claude-handoff
+description: "Session handoffs & standing project memory from Claude Code history, via the chf CLI. Use when the user wants to continue or hand off work in another model or a fresh session, recover a crashed or usage-limited session, export or summarize a past session, find a session by content ('where did we talk about X'), or refresh/curate the project memory brief. Trigger: /claude-handoff"
+trigger: /claude-handoff
+---
+
+# /claude-handoff
+
+Drives **`chf`** (claude-handoff) — turns Claude Code JSONL sessions into
+paste-anywhere handoff documents and standing project memory (`--brief`).
+Deterministic and offline by default, zero tokens; redaction always on.
+
+## Usage
+
+```
+/claude-handoff                                    # THIS session → clipboard, paste-ready
+/claude-handoff <words>                            # newest session whose title/first prompt matches
+/claude-handoff --grep X [--grep Y]                # newest session that TALKED about X (AND)
+/claude-handoff --list [--grep X]                  # list sessions (date · id · first prompt)
+/claude-handoff --fit 32k                          # size to a token budget (deterministic only)
+/claude-handoff --llm claude-cli                   # real summary via Pro/Max login — no API key
+/claude-handoff --full | --last N | --since 2h     # verbatim turns / only the tail
+/claude-handoff --project NAME --merge             # whole project → ONE handoff
+/claude-handoff --anonymize                        # public-safe: ~ paths, no emails/IPs/username
+/claude-handoff --brief                            # refresh project memory (free, factual)
+/claude-handoff --brief --llm claude-cli           # re-distill memory (cached — new sessions only)
+/claude-handoff --brief --keep SPEC | --exclude ID # curate what feeds the memory (sticky)
+/claude-handoff --brief --grep X -o -              # thematic memory (export-only)
+/claude-handoff -o graphify | --brief -o graphify  # file it into graphify's raw/ corpus (≥ 0.20)
+/claude-handoff conversations.json [--brief]       # claude.ai / ChatGPT export as input
+/claude-handoff --install-hook | --install-brief-hook   # automation hooks (explicit ask only)
+```
+
+## What You Must Do When Invoked
+
+If the user invoked `/claude-handoff --help` or `-h`: print the `## Usage`
+block above verbatim and stop.
+
+**Step 1 — ensure installed.** `chf --version`. Missing →
+`brew install Vasilispapg/tap/claude-handoff` (or `pipx install claude-handoff`).
+
+**Step 2 — flags, not subcommands.** There is no `chf brief` / `chf export`
+/ `chf list`. A bare word argument is a NAME SEARCH (`chf "login bug"`).
+Everything else is a flag: `--brief`, `--list`, `-o`, `--llm`.
+
+**Step 3 — pick the mode.**
+- Hand off / export / summarize one session → handoff (the default mode).
+- "where / which session was it…" → `chf --list --grep "X"` and show the
+  matches; export only when asked.
+- memory / brief / "remember this across sessions" → `--brief` mode.
+- Hooks, MCP, config — only on explicit request (hooks edit
+  `~/.claude/settings.json`; check there what is already installed before
+  offering).
+
+**Step 4 — which session?** Run from inside a live session, bare `chf`
+picks the CURRENT session — the newest file IS this conversation.
+- "hand THIS off / continue elsewhere" → bare `chf` is correct.
+- "the crashed / previous / yesterday's session" → `chf --list` first (top
+  entry = this session), then target explicitly: `chf --name <id-prefix>`
+  (8-hex id from `--list` or a brief citation), or `--name "title words"`,
+  or `--grep "content"`.
+- NEVER use `-i` or bare `--exclude` — they need a TTY you don't have and
+  exit with "-i needs a terminal". Use `--list` + explicit ids instead.
+- Several sessions into one document: pass several paths, or `--merge`
+  (whole scope), oldest → newest.
+
+**Step 5 — route the output.**
+- To paste into another model → `-o clipboard`; tell the user it's
+  paste-ready.
+- As a file → default `handoff.md`, or the path the user named. To read in
+  chat → `-o -`. Machine-readable → `--format json`.
+- Always relay chf's stderr result line (chars, ≈tokens) back to the user.
+
+**Step 6 — LLM only when asked.** Deterministic is the default and costs
+nothing.
+- Subscription / "no API key" → `--llm claude-cli`. NOT `--llm claude` —
+  that is the ANTHROPIC_API_KEY API path. `ollama` = fully local; `claude`
+  / `openai` / `gemini` need keys (`--model` overrides the model id).
+- `--fit` refuses to combine with `--llm` — deterministic sizing only, by
+  design.
+- Big sessions map-reduce with a progress bar; `claude-cli` and `ollama`
+  run chunks sequentially and can take minutes → run the command in the
+  background and report when done. It works from inside a Claude Code
+  session (the nested CLI's env is scrubbed).
+- `--focus "…"` steers the summary; `--with-transcript` appends the
+  cleaned transcript.
+
+**Step 7 — brief specifics.**
+- The standing brief lives at `~/.claude/briefs/<project>.md`; with the
+  brief hooks installed, SessionStart injects it and SessionEnd/PreCompact
+  refresh the factual part for free. No LLM ever runs from a hook.
+- Refresh facts: `chf --brief`. Re-distill: `chf --brief --llm claude-cli`
+  — per-session notes are cached, only NEW sessions are paid for.
+- Curation is sticky across refreshes: `--exclude a1b2c3d4[,…]`,
+  `--keep first:2,last:20`, `--keep since:30d`; clear with
+  `--exclude none` / `--keep all`.
+- Thematic (`--brief --grep X`) and web-export (`conversations.json
+  --brief`) briefs REQUIRE an explicit `-o` and never touch the standing
+  brief. Keep it that way.
+- In-project copies are refresh-only: once `raw/project-memory.md` (via
+  `-o graphify`) or a root `BRIEF.md` the user created exists, every brief
+  refresh rewrites them; deleting the file stops it. Never create either
+  yourself unless asked.
+
+## Rules
+
+- Redaction stays ON in every output. Never add `--no-redact` unless the
+  user literally typed it.
+- Anything headed somewhere public (issue, forum, post) → add
+  `--anonymize`.
+- `-o graphify` needs chf ≥ 0.20 — if `chf --help` doesn't mention
+  graphify, don't use it (older versions would write a literal file named
+  `graphify`).
+- Something silently did nothing → re-run with `--debug` before concluding
+  anything.
+- Store scoping: cwd inside a project → that project's sessions; a parent
+  "master folder" → every project under it; `--any` → everything;
+  `CLAUDE_HOME` relocates the store. Web exports (`conversations.json`)
+  work as input anywhere.
+"""
+
+
+def _register_skill_trigger(claude_md: Path) -> None:
+    """Append the /claude-handoff trigger section to CLAUDE.md unless a
+    `# claude-handoff` heading is already there (a hand-written one
+    counts) — everything else in the file is preserved."""
+    existing = ""
+    if claude_md.is_file():
+        existing = claude_md.read_text(encoding="utf-8")
+    if "# claude-handoff" in (ln.strip() for ln in existing.splitlines()):
+        return
+    joined = SKILL_TRIGGER_BLOCK if not existing.strip() else (
+        existing.rstrip("\n") + "\n\n" + SKILL_TRIGGER_BLOCK)
+    claude_md.parent.mkdir(parents=True, exist_ok=True)
+    claude_md.write_text(joined, encoding="utf-8")
+
+
+def _strip_skill_trigger(claude_md: Path) -> None:
+    """Remove our `# claude-handoff` section (the heading up to the next
+    `# ` heading or EOF); every other line survives."""
+    if not claude_md.is_file():
+        return
+    lines = claude_md.read_text(encoding="utf-8").splitlines(keepends=True)
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.strip() == "# claude-handoff"), None)
+    if start is None:
+        return
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith("# ")), len(lines))
+    del lines[start:end]
+    out = "".join(lines)
+    out = out.rstrip("\n") + "\n" if out.strip() else ""
+    claude_md.write_text(out, encoding="utf-8")
+
+
+def install_skill(skills_dir: Path | None = None,
+                  claude_md: Path | None = None,
+                  remove: bool = False) -> None:
+    """Install (or remove) the /claude-handoff Claude Code skill: SKILL.md
+    under ~/.claude/skills plus a trigger section in ~/.claude/CLAUDE.md.
+    Idempotent both ways; other skills and CLAUDE.md content untouched."""
+    home = Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
+    skills_dir = skills_dir or home / "skills"
+    claude_md = claude_md or home / "CLAUDE.md"
+    skill_path = skills_dir / "claude-handoff" / "SKILL.md"
+    if remove:
+        try:
+            skill_path.unlink()
+        except OSError:
+            pass
+        try:
+            skill_path.parent.rmdir()  # only when empty — user files stay
+        except OSError:
+            pass
+        _strip_skill_trigger(claude_md)
+        print(f"Claude Code skill removed ({skill_path} and its CLAUDE.md "
+              f"trigger).", file=sys.stderr)
+        return
+    skill_path.parent.mkdir(parents=True, exist_ok=True)
+    skill_path.write_text(SKILL_MD, encoding="utf-8")
+    _register_skill_trigger(claude_md)
+    print(f"Claude Code skill installed at {skill_path}.", file=sys.stderr)
+    print("Typing /claude-handoff in a Claude Code session now loads it — "
+          "Claude knows how to drive chf.\n"
+          "Undo with: claude-handoff --uninstall-skill", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
@@ -2954,8 +3333,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "brief — ID is an id prefix (see --list or the "
                          "brief's citations), comma-separate or repeat "
                          "for several; bare --exclude opens a numbered "
-                         "picker; sticky across refreshes, --exclude "
-                         "none clears")
+                         "picker with the stored set pre-selected "
+                         "(numbers toggle); sticky across refreshes, "
+                         "--exclude none clears")
     ap.add_argument("--merge", action="store_true",
                     help="merge every session in scope (project / cwd / "
                          "--name match) into ONE handoff, oldest first")
@@ -2996,6 +3376,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "session ends (SessionEnd hook)")
     ap.add_argument("--uninstall-hook", action="store_true",
                     help="remove the auto-handoff hook")
+    ap.add_argument("--install-skill", action="store_true",
+                    help="install the /claude-handoff Claude Code skill "
+                         "(SKILL.md + CLAUDE.md trigger) so Claude knows "
+                         "how to drive chf")
+    ap.add_argument("--uninstall-skill", action="store_true",
+                    help="remove the /claude-handoff skill and its trigger")
     ap.add_argument("--completions", choices=["bash", "zsh"],
                     help="print a shell-completion snippet and exit")
     ap.add_argument("--mcp", action="store_true",
@@ -3183,6 +3569,13 @@ def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
               f"{', LLM-summarized' if args.llm else ''}) — paste away.",
               file=sys.stderr)
         return
+    if args.output == "graphify":
+        out = write_graphify_corpus(
+            doc, "handoff", session_id=parsed["meta"].get("session_id"))
+        print(f"Wrote {tilde(out)} ({len(doc):,} chars, {tok}) — next: "
+              f"/graphify --update merges it into the knowledge graph.",
+              file=sys.stderr)
+        return
     out = Path(args.output)
     out.write_text(doc, encoding="utf-8")
     n_user = parsed["meta"]["n_user"]
@@ -3236,36 +3629,52 @@ def _load_config() -> dict:
     return cfg
 
 
-def _pick_excludes(parsed_list: list) -> list:
+def _pick_excludes(parsed_list: list,
+                   preselected: list | None = None) -> list:
     """Bare --exclude: numbered multi-select of sessions to LEAVE OUT
-    ("2", "1,3", "2-4") — shown with date, id and title. Terminal only."""
+    ("2", "1,3", "2-4") — shown with date, id and title. The stamp's
+    stored exclusions arrive pre-selected (✗) and typed numbers TOGGLE,
+    so the picker edits the sticky set instead of replacing it: empty
+    input keeps the ✗ set, `none` clears it. Terminal only."""
     if not sys.stdin.isatty():
         raise SystemExit("bare --exclude needs a terminal — pass ids "
                          "instead: --exclude ID[,ID…] (see --list).")
     ordered = sorted(parsed_list,
                      key=lambda p: p["meta"]["first_ts"] or "")
-    print("Pick the session(s) to EXCLUDE from the brief "
-          "(e.g. 2 or 1,3 or 2-4; empty keeps all):", file=sys.stderr)
+    pre = [e for e in (preselected or []) if e]
+    excluded = {i for i, p in enumerate(ordered, 1)
+                if any((p["meta"]["session_id"] or "").startswith(e)
+                       for e in pre)}
+    print("Pick the session(s) to EXCLUDE from the brief — numbers "
+          "toggle (e.g. 2 or 1,3 or 2-4); empty keeps the ✗ set, "
+          "`none` clears it:", file=sys.stderr)
     for i, p in enumerate(ordered, 1):
         meta = p["meta"]
-        print(f"  {i}. {fmt_ts(meta['first_ts'])}  "
+        mark = "✗" if i in excluded else " "
+        print(f"  {i}. {mark} {fmt_ts(meta['first_ts'])}  "
               f"{(meta['session_id'] or '?')[:8]}  "
               f"{one_line(_session_title(p), 60)}", file=sys.stderr)
     while True:
         choice = input("> ").strip()
-        if not choice:
+        if choice.lower() == "none":
             return []
-        picked = _parse_pick(choice, len(ordered))
-        if picked:
-            return [(ordered[i - 1]["meta"]["session_id"] or "")[:8]
-                    for i in picked]
-        print("Try again — a number, 1,3 or 2-4.", file=sys.stderr)
+        if choice:
+            picked = set(_parse_pick(choice, len(ordered)))
+            if not picked:
+                print("Try again — a number, 1,3 or 2-4 (empty keeps "
+                      "the ✗ set, `none` clears it).", file=sys.stderr)
+                continue
+        else:
+            picked = set()
+        return [(ordered[i - 1]["meta"]["session_id"] or "")[:8]
+                for i in sorted(excluded ^ picked)]
 
 
 def _resolve_excludes(args: argparse.Namespace, old_stamp: dict | None,
                       parsed_list: list) -> list:
     """The exclusion set for this run: an explicit --exclude replaces
-    the stored one ('none' clears, bare opens the picker); no flag
+    the stored one ('none' clears); bare opens the picker WITH the
+    stored set pre-selected, so it edits rather than replaces; no flag
     keeps whatever the stamp already carries — sticky, like the
     distillation itself."""
     raw = args.exclude or []
@@ -3276,7 +3685,8 @@ def _resolve_excludes(args: argparse.Namespace, old_stamp: dict | None,
     if "none" in explicit:
         return []
     if "" in raw:
-        explicit += _pick_excludes(parsed_list)
+        explicit += _pick_excludes(
+            parsed_list, old_stamp["exclude"] if old_stamp else [])
     return list(dict.fromkeys(explicit))
 
 
@@ -3322,6 +3732,13 @@ def _run_export_brief(args: argparse.Namespace, export: Path) -> None:
         print(f"Copied brief to clipboard via {tool} ({len(doc):,} chars, "
               f"≈{_fmt_tokens(len(doc) // 4)} tokens, {len(parsed_list)} "
               f"conversations) — paste away.", file=sys.stderr)
+        return
+    if args.output == "graphify":
+        out = write_graphify_corpus(doc, "brief")
+        print(f"Wrote {tilde(out)} ({len(parsed_list)} conversations, "
+              f"≈{_fmt_tokens(len(doc) // 4)} tokens) — next: "
+              f"/graphify --update merges it into the knowledge graph.",
+              file=sys.stderr)
         return
     if str(args.output) == "-":
         sys.stdout.write(doc)
@@ -3372,16 +3789,24 @@ def _run_brief(args: argparse.Namespace) -> None:
                              "pass -o (a file, '-', or clipboard) so it "
                              "never overwrites the project's standing "
                              "memory.")
+        if args.output == "graphify":
+            raise SystemExit("--brief --grep is a thematic export — -o "
+                             "graphify would overwrite the standing "
+                             "corpus doc (raw/project-memory.md); pass "
+                             "a plain -o file instead.")
         parsed_list = _grep_parsed(parsed_list, args.grep)
         if not parsed_list:
             raise SystemExit(f"No session's conversation matches "
                              f"{' AND '.join(args.grep)!r} in {scope!r}.")
-    # clipboard is a way to SHIP the current brief (e.g. paste the
-    # project memory into another model), so it grafts like the default
-    # destination; any other -o stays a plain exported skeleton
+    # clipboard SHIPS the current brief (paste the project memory into
+    # another model) and graphify FILES it (raw/ corpus for the knowledge
+    # graph), so both graft like the default destination; any other -o
+    # stays a plain exported skeleton
     to_clipboard = args.output in ("clipboard", "clip")
+    to_graphify = args.output == "graphify"
     prior = (brief_path(scope)
-             if (args.output == "handoff.md" or to_clipboard)
+             if (args.output == "handoff.md" or to_clipboard
+                 or to_graphify)
              and not args.grep else None)
     old = (prior.read_text(encoding="utf-8")
            if prior is not None and prior.is_file() else None)
@@ -3444,6 +3869,13 @@ def _run_brief(args: argparse.Namespace) -> None:
               f"{len(parsed_list)} sessions) — paste away.",
               file=sys.stderr)
         return
+    if to_graphify:
+        out = write_graphify_corpus(doc, "brief")
+        print(f"Wrote {tilde(out)} ({len(parsed_list)} sessions, "
+              f"≈{_fmt_tokens(len(doc) // 4)} tokens) — next: "
+              f"/graphify --update merges it into the knowledge graph.",
+              file=sys.stderr)
+        return
     dest = (brief_path(scope) if args.output == "handoff.md"
             else args.output)
     if str(dest) == "-":
@@ -3454,6 +3886,9 @@ def _run_brief(args: argparse.Namespace) -> None:
     dest.write_text(doc, encoding="utf-8")
     print(f"Wrote brief {tilde(dest)} ({len(parsed_list)} sessions, "
           f"\u2248{_fmt_tokens(len(doc) // 4)} tokens)", file=sys.stderr)
+    if args.output == "handoff.md":     # store write \u2192 sync project copies
+        for m in sync_brief_mirrors(Path(label), doc):
+            print(f"Synced {tilde(m)}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -3486,6 +3921,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.install_hook or args.uninstall_hook:
         install_hook(remove=args.uninstall_hook)
+        return
+    if args.install_skill or args.uninstall_skill:
+        install_skill(remove=args.uninstall_skill)
         return
     if args.list:
         one = args.session[0] if len(args.session) == 1 else None

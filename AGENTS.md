@@ -96,7 +96,13 @@ Import direction flows strictly downward (no cycles): `textutil` →
   (-i; multi-select via `_parse_pick` merges), `print_completions`,
   `run_mcp_server`/`_mcp_tools`/`_mcp_call` (--mcp; stdout carries only
   JSON-RPC — log to stderr; LLM summaries only behind --allow-llm),
-  `_copy_clipboard`
+  `_copy_clipboard`, `write_graphify_corpus` (-o graphify: doc → `raw/`
+  with node frontmatter; brief = ONE evolving `project-memory.md`,
+  handoffs per-session; never invokes graphify — prints the
+  `/graphify --update` next step; `_warn_raw_unignored`),
+  `sync_brief_mirrors` (refresh-only in-project brief copies —
+  `raw/project-memory.md` + root `BRIEF.md` — synced on every STORE
+  brief write, explicit or hook; never creates either file)
 - Tail filters (`parse.py`): `slice_turns` (`--last`, `--since`), `_since_cutoff`
 - Hook (`integrations.py`): `install_hook` / `run_hook_mode` (`--install-hook`,
   `--hook-stdin`) — hook mode swallows all errors by design: a hook must
@@ -104,6 +110,13 @@ Import direction flows strictly downward (no cycles): `textutil` →
   `_handle_sidechain_record` (inline records), `_parse_agent_files`
   (separate agent-*.jsonl transcripts; lane labels via `_agent_labels`,
   parent steering via `_drain_agent_texts`), `render_sidechains`.
+- Claude Code skill (`integrations.py`): `install_skill`
+  (`--install-skill` / `--uninstall-skill`) — writes the embedded
+  `SKILL_MD` (canonical copy: `skills/claude-handoff/SKILL.md`,
+  byte-identity test-pinned) under `~/.claude/skills/claude-handoff/`
+  and appends/strips an idempotent `# claude-handoff` trigger section in
+  `~/.claude/CLAUDE.md` (hand-written headings respected; removal
+  round-trips the rest of the file byte-for-byte).
 - Parsing (`parse.py`): `parse_session` (coordinator) + single-responsibility helpers
   `_handle_assistant_record`, `_handle_user_record`, `_handle_tool_use`,
   `_update_envelope_meta`; text utils `user_text`, `tool_result_text`,
@@ -112,7 +125,12 @@ Import direction flows strictly downward (no cycles): `textutil` →
   `render_footer`, `build_deterministic`
 - Project memory (`brief.py`): `build_brief_deterministic` (timeline +
   activity rollup, capped at `TIMELINE_CAP`; `Repo HEAD` line via the
-  git helpers), `_git_reflog`/`_git_head`/`_git_commits_since` (repo
+  git helpers; `_code_map` appends a capped `## Code map` from
+  `graphify-out/graph.json` + `.graphify_labels.json` when present —
+  with `_code_bridges` (cross-community links) and `_code_flows`
+  (labeled hyperedges) knowledge lines; tolerant: any surprise means
+  no section, never an error),
+  `_git_reflog`/`_git_head`/`_git_commits_since` (repo
   freshness read straight from `.git/logs/HEAD` — never a `git`
   subprocess), `build_brief_llm`
   (per-session notes, cached by prompt+content hash, then one reduce —
@@ -144,7 +162,9 @@ Import direction flows strictly downward (no cycles): `textutil` →
   `_load_config` (config defaults; no_redact is deliberately not
   configurable), `_run_brief` (with `_resolve_excludes`/`_pick_excludes`
   — bare `--exclude` opens a numbered multi-select built on
-  `_parse_pick`), `build_document`, `write_output`, `main`
+  `_parse_pick`; the stamp's stored exclusions arrive pre-selected (✗)
+  and typed numbers toggle, so the picker EDITS the sticky set — empty
+  keeps it, `none` clears), `build_document`, `write_output`, `main`
 
 ## Workflows — follow these checklists
 

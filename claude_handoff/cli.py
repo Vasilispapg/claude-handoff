@@ -41,10 +41,13 @@ from .integrations import (
     _copy_clipboard,
     install_brief_hook,
     install_hook,
+    install_skill,
     run_brief_hook_mode,
     run_brief_update_mode,
     run_hook_mode,
     run_mcp_server,
+    sync_brief_mirrors,
+    write_graphify_corpus,
 )
 from .llm import CACHE_DIR, PROVIDERS, build_llm, llm_summarize
 from .parse import looks_trivial, merge_parsed, parse_session, slice_turns
@@ -141,8 +144,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "brief — ID is an id prefix (see --list or the "
                          "brief's citations), comma-separate or repeat "
                          "for several; bare --exclude opens a numbered "
-                         "picker; sticky across refreshes, --exclude "
-                         "none clears")
+                         "picker with the stored set pre-selected "
+                         "(numbers toggle); sticky across refreshes, "
+                         "--exclude none clears")
     ap.add_argument("--merge", action="store_true",
                     help="merge every session in scope (project / cwd / "
                          "--name match) into ONE handoff, oldest first")
@@ -183,6 +187,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "session ends (SessionEnd hook)")
     ap.add_argument("--uninstall-hook", action="store_true",
                     help="remove the auto-handoff hook")
+    ap.add_argument("--install-skill", action="store_true",
+                    help="install the /claude-handoff Claude Code skill "
+                         "(SKILL.md + CLAUDE.md trigger) so Claude knows "
+                         "how to drive chf")
+    ap.add_argument("--uninstall-skill", action="store_true",
+                    help="remove the /claude-handoff skill and its trigger")
     ap.add_argument("--completions", choices=["bash", "zsh"],
                     help="print a shell-completion snippet and exit")
     ap.add_argument("--mcp", action="store_true",
@@ -370,6 +380,13 @@ def write_output(doc: str, parsed: dict, args: argparse.Namespace) -> None:
               f"{', LLM-summarized' if args.llm else ''}) — paste away.",
               file=sys.stderr)
         return
+    if args.output == "graphify":
+        out = write_graphify_corpus(
+            doc, "handoff", session_id=parsed["meta"].get("session_id"))
+        print(f"Wrote {tilde(out)} ({len(doc):,} chars, {tok}) — next: "
+              f"/graphify --update merges it into the knowledge graph.",
+              file=sys.stderr)
+        return
     out = Path(args.output)
     out.write_text(doc, encoding="utf-8")
     n_user = parsed["meta"]["n_user"]
@@ -423,36 +440,52 @@ def _load_config() -> dict:
     return cfg
 
 
-def _pick_excludes(parsed_list: list) -> list:
+def _pick_excludes(parsed_list: list,
+                   preselected: list | None = None) -> list:
     """Bare --exclude: numbered multi-select of sessions to LEAVE OUT
-    ("2", "1,3", "2-4") — shown with date, id and title. Terminal only."""
+    ("2", "1,3", "2-4") — shown with date, id and title. The stamp's
+    stored exclusions arrive pre-selected (✗) and typed numbers TOGGLE,
+    so the picker edits the sticky set instead of replacing it: empty
+    input keeps the ✗ set, `none` clears it. Terminal only."""
     if not sys.stdin.isatty():
         raise SystemExit("bare --exclude needs a terminal — pass ids "
                          "instead: --exclude ID[,ID…] (see --list).")
     ordered = sorted(parsed_list,
                      key=lambda p: p["meta"]["first_ts"] or "")
-    print("Pick the session(s) to EXCLUDE from the brief "
-          "(e.g. 2 or 1,3 or 2-4; empty keeps all):", file=sys.stderr)
+    pre = [e for e in (preselected or []) if e]
+    excluded = {i for i, p in enumerate(ordered, 1)
+                if any((p["meta"]["session_id"] or "").startswith(e)
+                       for e in pre)}
+    print("Pick the session(s) to EXCLUDE from the brief — numbers "
+          "toggle (e.g. 2 or 1,3 or 2-4); empty keeps the ✗ set, "
+          "`none` clears it:", file=sys.stderr)
     for i, p in enumerate(ordered, 1):
         meta = p["meta"]
-        print(f"  {i}. {fmt_ts(meta['first_ts'])}  "
+        mark = "✗" if i in excluded else " "
+        print(f"  {i}. {mark} {fmt_ts(meta['first_ts'])}  "
               f"{(meta['session_id'] or '?')[:8]}  "
               f"{one_line(_session_title(p), 60)}", file=sys.stderr)
     while True:
         choice = input("> ").strip()
-        if not choice:
+        if choice.lower() == "none":
             return []
-        picked = _parse_pick(choice, len(ordered))
-        if picked:
-            return [(ordered[i - 1]["meta"]["session_id"] or "")[:8]
-                    for i in picked]
-        print("Try again — a number, 1,3 or 2-4.", file=sys.stderr)
+        if choice:
+            picked = set(_parse_pick(choice, len(ordered)))
+            if not picked:
+                print("Try again — a number, 1,3 or 2-4 (empty keeps "
+                      "the ✗ set, `none` clears it).", file=sys.stderr)
+                continue
+        else:
+            picked = set()
+        return [(ordered[i - 1]["meta"]["session_id"] or "")[:8]
+                for i in sorted(excluded ^ picked)]
 
 
 def _resolve_excludes(args: argparse.Namespace, old_stamp: dict | None,
                       parsed_list: list) -> list:
     """The exclusion set for this run: an explicit --exclude replaces
-    the stored one ('none' clears, bare opens the picker); no flag
+    the stored one ('none' clears); bare opens the picker WITH the
+    stored set pre-selected, so it edits rather than replaces; no flag
     keeps whatever the stamp already carries — sticky, like the
     distillation itself."""
     raw = args.exclude or []
@@ -463,7 +496,8 @@ def _resolve_excludes(args: argparse.Namespace, old_stamp: dict | None,
     if "none" in explicit:
         return []
     if "" in raw:
-        explicit += _pick_excludes(parsed_list)
+        explicit += _pick_excludes(
+            parsed_list, old_stamp["exclude"] if old_stamp else [])
     return list(dict.fromkeys(explicit))
 
 
@@ -509,6 +543,13 @@ def _run_export_brief(args: argparse.Namespace, export: Path) -> None:
         print(f"Copied brief to clipboard via {tool} ({len(doc):,} chars, "
               f"≈{_fmt_tokens(len(doc) // 4)} tokens, {len(parsed_list)} "
               f"conversations) — paste away.", file=sys.stderr)
+        return
+    if args.output == "graphify":
+        out = write_graphify_corpus(doc, "brief")
+        print(f"Wrote {tilde(out)} ({len(parsed_list)} conversations, "
+              f"≈{_fmt_tokens(len(doc) // 4)} tokens) — next: "
+              f"/graphify --update merges it into the knowledge graph.",
+              file=sys.stderr)
         return
     if str(args.output) == "-":
         sys.stdout.write(doc)
@@ -559,16 +600,24 @@ def _run_brief(args: argparse.Namespace) -> None:
                              "pass -o (a file, '-', or clipboard) so it "
                              "never overwrites the project's standing "
                              "memory.")
+        if args.output == "graphify":
+            raise SystemExit("--brief --grep is a thematic export — -o "
+                             "graphify would overwrite the standing "
+                             "corpus doc (raw/project-memory.md); pass "
+                             "a plain -o file instead.")
         parsed_list = _grep_parsed(parsed_list, args.grep)
         if not parsed_list:
             raise SystemExit(f"No session's conversation matches "
                              f"{' AND '.join(args.grep)!r} in {scope!r}.")
-    # clipboard is a way to SHIP the current brief (e.g. paste the
-    # project memory into another model), so it grafts like the default
-    # destination; any other -o stays a plain exported skeleton
+    # clipboard SHIPS the current brief (paste the project memory into
+    # another model) and graphify FILES it (raw/ corpus for the knowledge
+    # graph), so both graft like the default destination; any other -o
+    # stays a plain exported skeleton
     to_clipboard = args.output in ("clipboard", "clip")
+    to_graphify = args.output == "graphify"
     prior = (brief_path(scope)
-             if (args.output == "handoff.md" or to_clipboard)
+             if (args.output == "handoff.md" or to_clipboard
+                 or to_graphify)
              and not args.grep else None)
     old = (prior.read_text(encoding="utf-8")
            if prior is not None and prior.is_file() else None)
@@ -631,6 +680,13 @@ def _run_brief(args: argparse.Namespace) -> None:
               f"{len(parsed_list)} sessions) — paste away.",
               file=sys.stderr)
         return
+    if to_graphify:
+        out = write_graphify_corpus(doc, "brief")
+        print(f"Wrote {tilde(out)} ({len(parsed_list)} sessions, "
+              f"≈{_fmt_tokens(len(doc) // 4)} tokens) — next: "
+              f"/graphify --update merges it into the knowledge graph.",
+              file=sys.stderr)
+        return
     dest = (brief_path(scope) if args.output == "handoff.md"
             else args.output)
     if str(dest) == "-":
@@ -641,6 +697,9 @@ def _run_brief(args: argparse.Namespace) -> None:
     dest.write_text(doc, encoding="utf-8")
     print(f"Wrote brief {tilde(dest)} ({len(parsed_list)} sessions, "
           f"\u2248{_fmt_tokens(len(doc) // 4)} tokens)", file=sys.stderr)
+    if args.output == "handoff.md":     # store write \u2192 sync project copies
+        for m in sync_brief_mirrors(Path(label), doc):
+            print(f"Synced {tilde(m)}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -673,6 +732,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.install_hook or args.uninstall_hook:
         install_hook(remove=args.uninstall_hook)
+        return
+    if args.install_skill or args.uninstall_skill:
+        install_skill(remove=args.uninstall_skill)
         return
     if args.list:
         one = args.session[0] if len(args.session) == 1 else None

@@ -186,7 +186,9 @@ applies only here, so cached notes stay reusable across different
 focuses.
 
 **Curating the input:** `--exclude <id>` leaves sessions out entirely
-(bare `--exclude` opens a numbered picker) and `--keep first:2,last:20`
+(bare `--exclude` opens a numbered picker — stored exclusions arrive
+pre-selected with ✗ and numbers toggle, so you edit the set instead of
+re-picking it) and `--keep first:2,last:20`
 — or `--keep since:30d`, by last activity — windows a huge history.
 Both are stored in the stamp, so hooks and every later rebuild re-apply
 them: count and time windows slide. Two more inputs are exports by
@@ -225,6 +227,18 @@ a hierarchy where nothing is more than one step away:
 | **`--grep`** | "Where exactly did we say that?" | 0.5s, free |
 | **`chf --name <sid>`** | The full ground truth behind any citation | free |
 
+Running **graphify** on the project? The hierarchy gains a structural
+layer for free: `chf --brief -o graphify` files the memory into `raw/`
+so `/graphify --update` links decisions and open threads into the code
+graph, and once `graphify-out/graph.json` exists every brief carries a
+`## Code map` — communities, hub concepts, the `bridges:` between
+subsystems and the labeled `flows:`, and how many commits the graph is
+behind — so sessions start knowing the code's shape too. The
+in-project copies keep themselves fresh: once `raw/project-memory.md`
+exists (or a `BRIEF.md` you `touch` at the root for a committable
+copy), every brief refresh — explicit or hook — rewrites them; delete
+the file to stop.
+
 ## Cheatsheet
 
 ```bash
@@ -243,8 +257,10 @@ chf --brief --exclude                # picker: leave sessions out (sticky)
 chf --brief --keep first:2,last:20   # window a huge history (sliding)
 chf --brief --keep since:30d         # …or by time
 chf --brief --grep auth -o -         # thematic memory (export-only)
+chf --brief -o graphify              # file the memory into the knowledge graph (raw/)
 chf conversations.json --brief -o brief.md   # memory from a web export
 chf --install-brief-hook             # inject memory into every session
 chf --install-hook                   # auto-handoff on session end
+chf --install-skill                  # teach Claude Code to drive chf (/claude-handoff)
 chf --debug ...                      # show every tolerated failure
 ```

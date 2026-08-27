@@ -156,7 +156,9 @@ nothing is silently dropped, at any size.
 
 You can also curate what feeds the memory: `--exclude <id>` leaves a
 session out (a duplicate, an experiment — bare `--exclude` opens a
-numbered picker), and `--keep first:2,last:20` windows a huge history to
+numbered picker that remembers: the stored exclusions arrive
+pre-selected with ✗ and typed numbers toggle, so you edit the set
+instead of re-picking it), and `--keep first:2,last:20` windows a huge history to
 the founding sessions plus a sliding recent window. Both are **sticky** —
 stored in the brief's stamp, so hooks and later refreshes keep honoring
 them until you change them (`--exclude none`, `--keep all`). And
@@ -170,6 +172,25 @@ about X), and `chf conversations.json --brief -o brief.md` builds
 standing memory **from a claude.ai or ChatGPT export** — every
 conversation, cited by its id. Both are exports by design (explicit
 `-o` only) so they never overwrite the standing brief.
+
+Running **graphify** (`pip install graphifyy`)? The two tools compose in
+both directions, zero config. `chf --brief -o graphify` files the
+current memory — distillation included — into `raw/`, graphify's ingest
+folder, as ONE evolving `project-memory.md` carrying the frontmatter
+graphify maps onto nodes; the next `/graphify --update` links your
+decisions, fixes and open threads into the code's knowledge graph
+(plain `chf -o graphify` files one session's handoff the same way, and
+you get a heads-up if `raw/` isn't gitignored). In the other direction,
+when `graphify-out/graph.json` exists the brief gains a free
+`## Code map` section — nodes, communities, hub concepts, plus the
+*knowledge* lines: `bridges:` (the strongest links crossing community
+boundaries — where subsystems touch) and `flows:` (graphify's labeled
+multi-node patterns) — so a new session starts knowing the code's
+*structure*, not just its history. And the copies stay fresh on their
+own: once `raw/project-memory.md` exists, every brief refresh (explicit
+or hook) rewrites it — same for a `BRIEF.md` you `touch` at the repo
+root when you want a plain, committable copy. Refresh-only, ever:
+delete the file and nothing recreates it.
 
 ```bash
 chf --install-brief-hook
@@ -192,6 +213,7 @@ walkthrough: **[docs/GUIDE.md](docs/GUIDE.md)**.
 ```bash
 chf --install-hook                 # SessionEnd + PreCompact → handoff to ~/.claude/handoffs/
 chf --install-brief-hook           # SessionStart/End + PreCompact → project memory (above)
+chf --install-skill                # /claude-handoff skill → Claude Code drives chf correctly
 ```
 
 PreCompact matters: right before Claude Code compacts a long session's
@@ -202,6 +224,15 @@ mid-session.
 Both edit `~/.claude/settings.json` non-destructively, are idempotent, and
 have matching `--uninstall-*` flags. Hook failures never break the host
 session, and hooks never trigger LLM calls or create files on their own.
+
+The third one is for Claude itself: `--install-skill` puts a
+`/claude-handoff` skill into `~/.claude/skills/` (plus its trigger in
+`~/.claude/CLAUDE.md`), so Claude Code knows the tool's grammar instead of
+guessing — which session bare `chf` picks from inside a live session,
+`claude-cli` (subscription) vs `claude` (API key), `--fit` for token
+budgets, no interactive pickers from an agent shell. Idempotent, respects
+a hand-written section, and `--uninstall-skill` removes both pieces
+without touching anything else in either file.
 
 ---
 
@@ -280,7 +311,7 @@ chf --since 2h --llm claude-cli    # summarize just the last two hours
 # project memory:
 chf --brief                        # free factual brief (timeline + files)
 chf --brief --llm claude-cli       # + distilled decisions/fixes/conventions
-chf --brief --exclude              # numbered picker: leave sessions out (sticky)
+chf --brief --exclude              # numbered picker: edit the sticky exclusions (✗ pre-selected, numbers toggle)
 chf --brief --keep first:2,last:20 # bound a huge history: founding + recent
 chf --brief --keep since:30d       # …or by time — the window slides
 chf --brief --grep auth -o -       # thematic memory: only the auth sessions
@@ -439,12 +470,13 @@ Set `PYTHONUTF8=1` (the CI runs the whole suite that way).
 | `--last N` / `--since 2h` | keep only the tail of the conversation (N user turns / a time window) |
 | `--merge` | merge every session in scope into ONE handoff (session-break markers, summed activity) |
 | `--brief` | distill the project's whole history into `~/.claude/briefs/<project>.md` (deterministic; `--llm` for real distillation) |
-| `--exclude ID` | with `--brief`: leave session(s) out of the memory — an id prefix (from `--list` or the brief's citations), comma-separate or repeat for several; **bare `--exclude` opens a numbered picker**; sticky across refreshes, `--exclude none` clears |
+| `--exclude ID` | with `--brief`: leave session(s) out of the memory — an id prefix (from `--list` or the brief's citations), comma-separate or repeat for several; **bare `--exclude` opens a numbered picker with the stored set pre-selected (✗) — numbers toggle, empty keeps, `none` clears**; sticky across refreshes, `--exclude none` clears |
 | `--keep SPEC` | with `--brief`: window the sessions that feed the memory — `20` / `last:20` (most recent), `first:2` (founding), `since:7d` (by last activity; ISO dates work too), or combinations like `first:2,since:30d`; sticky, so refreshes keep a **sliding window**; `--keep all` clears |
 | `--install-brief-hook` / `--uninstall-brief-hook` | project memory hooks: inject the brief at SessionStart, auto-refresh facts at SessionEnd |
 | `--install-hook` / `--uninstall-hook` | auto-write a handoff to `~/.claude/handoffs/` when each session ends |
+| `--install-skill` / `--uninstall-skill` | install the `/claude-handoff` Claude Code skill (SKILL.md under `~/.claude/skills/` + trigger section in `~/.claude/CLAUDE.md`) so Claude drives chf correctly — idempotent, hand-written sections respected, uninstall leaves the rest of CLAUDE.md untouched |
 | `--format md\|json` | markdown (default) or machine-readable JSON — also applies to `--list` |
-| `-o FILE` / `-o -` / `-o clipboard` | output file / stdout / clipboard (default `handoff.md`) |
+| `-o FILE` / `-o -` / `-o clipboard` / `-o graphify` | output file / stdout / clipboard / graphify corpus (`raw/`, for the knowledge graph) (default `handoff.md`) |
 | `--fit TOKENS` | size the deterministic handoff to a token budget (`32k`, `128k`, `1m`) by tightening transcript truncation |
 | `--full` | verbatim conversation turns (classic transcript) instead of the default condensed digest |
 | `--max-chars N` | cap the transcript section (default 80 000; keeps start + recent end) |

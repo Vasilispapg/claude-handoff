@@ -173,24 +173,17 @@ standing memory **from a claude.ai or ChatGPT export** — every
 conversation, cited by its id. Both are exports by design (explicit
 `-o` only) so they never overwrite the standing brief.
 
-Running **graphify** (`pip install graphifyy`)? The two tools compose in
-both directions, zero config. `chf --brief -o graphify` files the
-current memory — distillation included — into `raw/`, graphify's ingest
-folder, as ONE evolving `project-memory.md` carrying the frontmatter
-graphify maps onto nodes; the next `/graphify --update` links your
-decisions, fixes and open threads into the code's knowledge graph
-(plain `chf -o graphify` files one session's handoff the same way, and
-you get a heads-up if `raw/` isn't gitignored). In the other direction,
-when `graphify-out/graph.json` exists the brief gains a free
-`## Code map` section — nodes, communities, hub concepts, plus the
-*knowledge* lines: `bridges:` (the strongest links crossing community
-boundaries — where subsystems touch) and `flows:` (graphify's labeled
-multi-node patterns) — so a new session starts knowing the code's
-*structure*, not just its history. And the copies stay fresh on their
-own: once `raw/project-memory.md` exists, every brief refresh (explicit
-or hook) rewrites it — same for a `BRIEF.md` you `touch` at the repo
-root when you want a plain, committable copy. Refresh-only, ever:
-delete the file and nothing recreates it.
+Running **graphify**? The two tools compose in both directions, zero
+config: `chf --brief -o graphify` files the current memory into `raw/`
+— one evolving `project-memory.md` that the next `/graphify --update`
+links into the code's knowledge graph — and once
+`graphify-out/graph.json` exists, every brief gains a free `## Code
+map` (communities, hub concepts, cross-community `bridges:`, labeled
+`flows:`) so new sessions know the code's *structure*, not just its
+history. The in-project copies (`raw/project-memory.md`, optional root
+`BRIEF.md`) refresh on every brief write — strictly refresh-only,
+hooks never create files. The full loop lives in
+**[docs/GUIDE.md](docs/GUIDE.md)**.
 
 ```bash
 chf --install-brief-hook

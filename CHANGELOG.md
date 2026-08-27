@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.20.0 — 2026-08-27
 
 - **`--install-skill` — the tool teaches Claude to drive it**: ships
   the `/claude-handoff` Claude Code skill (canonical copy at

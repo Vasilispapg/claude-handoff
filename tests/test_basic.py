@@ -2908,37 +2908,43 @@ class GraphifyCorpusTests(unittest.TestCase):
     ingest folder — so the next /graphify --update merges session memory
     into the project's knowledge graph."""
 
-    def _chdir(self, td):
+    def _tmp_cwd(self):
+        """A TemporaryDirectory that is also the test's cwd. Cleanup order
+        matters on Windows: the cwd must be restored BEFORE the directory
+        is removed (a process cannot delete the directory it stands in),
+        so both cleanups go through addCleanup — LIFO restores first."""
+        import tempfile
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)              # runs last
         prev = os.getcwd()
-        os.chdir(td)
-        self.addCleanup(os.chdir, prev)
+        os.chdir(td.name)
+        self.addCleanup(os.chdir, prev)          # runs first
+        return Path(td.name)
 
     def test_handoff_o_graphify_writes_session_file(self):
         import contextlib
         import io
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
-            self._chdir(td)
-            buf = io.StringIO()
-            with contextlib.redirect_stderr(buf):
-                ch.main([str(FIXTURE), "-o", "graphify"])
-            out = Path(td) / "raw" / "session-abc123.md"
-            self.assertTrue(out.exists())
-            text = out.read_text(encoding="utf-8")
-            self.assertTrue(text.startswith("---\n"))     # frontmatter first
-            front = text.split("---", 2)[1]
-            self.assertIn("captured_at:", front)
-            self.assertIn("contributor: claude-handoff", front)
-            self.assertIn("abc123", front)                # session provenance
-            self.assertIn("Fix login bug", text)          # handoff body follows
+        td = self._tmp_cwd()
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ch.main([str(FIXTURE), "-o", "graphify"])
+        out = td / "raw" / "session-abc123.md"
+        self.assertTrue(out.exists())
+        text = out.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\n"))     # frontmatter first
+        front = text.split("---", 2)[1]
+        self.assertIn("captured_at:", front)
+        self.assertIn("contributor: claude-handoff", front)
+        self.assertIn("abc123", front)                # session provenance
+        self.assertIn("Fix login bug", text)          # handoff body follows
         self.assertIn("graphify --update", buf.getvalue())  # next-step hint
 
     def test_brief_o_graphify_carries_distillation_store_untouched(self):
         import contextlib
         import io
         import tempfile
-        with tempfile.TemporaryDirectory() as td, \
-                tempfile.TemporaryDirectory() as proj:
+        proj = self._tmp_cwd()
+        with tempfile.TemporaryDirectory() as td:
             old = ("<!-- claude-handoff-brief v=1 built=10 sessions=1 "
                    "newest_mtime=10 distilled=10 distilled_sessions=1 "
                    "provider=claude-cli -->\n"
@@ -2946,7 +2952,6 @@ class GraphifyCorpusTests(unittest.TestCase):
                    "## Distilled memory\n\n- Redis for drafts [abc123]\n")
             (Path(td) / "-home-vspapg-myapp.md").write_text(
                 old, encoding="utf-8")
-            self._chdir(proj)
             with unittest.mock.patch.object(
                     ch.brief, "find_sessions",
                     lambda *a, **k: [FIXTURE]), \
@@ -2957,7 +2962,7 @@ class GraphifyCorpusTests(unittest.TestCase):
                                                Path(td)), \
                     contextlib.redirect_stderr(io.StringIO()):
                 ch.main(["--brief", "-o", "graphify"])
-            out = Path(proj) / "raw" / "project-memory.md"
+            out = proj / "raw" / "project-memory.md"
             self.assertTrue(out.exists())
             text = out.read_text(encoding="utf-8")
             self.assertTrue(text.startswith("---\n"))
@@ -2992,17 +2997,15 @@ class GraphifyCorpusTests(unittest.TestCase):
             self.assertNotIn(".gitignore", buf.getvalue())
 
     def test_brief_grep_o_graphify_is_a_loud_error(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
-            self._chdir(td)
-            with unittest.mock.patch.object(
-                    ch.brief, "find_sessions", lambda *a, **k: [FIXTURE]), \
-                    unittest.mock.patch.object(
-                        ch.cli, "cwd_project_filter",
-                        lambda *a, **k: "-home-vspapg-myapp"):
-                with self.assertRaises(SystemExit) as cm:
-                    ch.main(["--brief", "--grep", "login", "-o", "graphify"])
-            self.assertIn("project-memory", str(cm.exception))
+        self._tmp_cwd()
+        with unittest.mock.patch.object(
+                ch.brief, "find_sessions", lambda *a, **k: [FIXTURE]), \
+                unittest.mock.patch.object(
+                    ch.cli, "cwd_project_filter",
+                    lambda *a, **k: "-home-vspapg-myapp"):
+            with self.assertRaises(SystemExit) as cm:
+                ch.main(["--brief", "--grep", "login", "-o", "graphify"])
+        self.assertIn("project-memory", str(cm.exception))
 
 
 class CodeMapTests(unittest.TestCase):
@@ -3202,7 +3205,8 @@ class BriefMirrorTests(unittest.TestCase):
                 ch.main(["--brief"])                 # store write → sync
                 self.assertEqual(len(calls), 1)
                 root, doc = calls[0]
-                self.assertEqual(root, "/home/vspapg/myapp")   # the label
+                # the label, decoded — os-native separators on Windows
+                self.assertEqual(Path(root), Path("/home/vspapg/myapp"))
                 self.assertIn("claude-handoff-brief v=1", doc)  # stamped
                 ch.main(["--brief", "-o", "clipboard"])   # export → no sync
                 self.assertEqual(len(calls), 1)

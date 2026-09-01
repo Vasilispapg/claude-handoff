@@ -1,0 +1,44 @@
+name: ✨ Feature request
+description: Suggest a new flag, provider, input format or behavior
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Zero runtime dependencies is the product** — an auditable, stdlib-only
+        tool you can `curl` and read. Proposals that need a third-party package
+        at runtime will be declined, however good the idea. See `CONTRIBUTING.md`.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do today, and where does the tool get in the way?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like it to do
+      description: The flag, output or behavior you have in mind. Sketch the command line if you can.
+      placeholder: "chf --since 3d --grep parser  # …"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: Existing flags, other tools, manual workarounds — and why they fall short.
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: This needs no new runtime dependency (stdlib only)
+          required: true
+        - label: I searched existing issues
+          required: true
+        - label: I'd be willing to open a PR for it

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 🔒 Security vulnerability
+    url: https://github.com/Vasilispapg/claude-handoff/security/advisories/new
+    about: Report privately — never in a public issue. See SECURITY.md.
+  - name: 📖 Docs first
+    url: https://github.com/Vasilispapg/claude-handoff#readme
+    about: README (flag reference), docs/GUIDE.md (walkthrough) and docs/DEVELOPMENT.md (internals) cover most questions.

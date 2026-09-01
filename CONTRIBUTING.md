@@ -1,6 +1,8 @@
 # Contributing
 
-Thanks for helping! Ground rules, in order of importance:
+Thanks for helping! Ground rules, in order of importance.
+Participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md);
+security bugs go through [SECURITY.md](SECURITY.md), never a public issue.
 
 **Zero dependencies is the product.** PRs adding runtime dependencies will be
 declined — the whole point is an auditable stdlib-only tool you can

@@ -1,0 +1,98 @@
+name: 🐛 Bug report
+description: Something breaks, or the output is wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Redact before you paste.** Transcripts contain your code, paths and
+        possibly secrets. Strip anything real — keep the *structure*, replace
+        the content with placeholders. `chf --anonymize` helps.
+
+        Found something that leaks secrets or sends data anywhere unexpected?
+        That is a security report — use
+        [Security → Report a vulnerability](https://github.com/Vasilispapg/claude-handoff/security/advisories/new)
+        instead, not this form.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead. Paste the traceback if there is one.
+      placeholder: |
+        Expected: the session exported.
+        Got: KeyError: 'message' …
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      render: shell
+      placeholder: chf --brief --llm claude-cli
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: claude-handoff version
+      description: "`chf --version`"
+      placeholder: "0.20.0"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: "`python3 --version`"
+      placeholder: "3.13.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - WSL
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - pipx
+        - pip
+        - uv / uvx
+        - single-file script (curl)
+        - from source
+    validations:
+      required: true
+
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Minimal redacted fixture
+      description: |
+        **The most valuable part of this report.** If the parser choked on a
+        session, cut it down to the few offending JSONL lines, replace all real
+        content with placeholders, and paste them here — that becomes a test in
+        `tests/fixtures/`. A failing fixture beats any description.
+      render: json
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I am on the latest version, and it still happens
+          required: true
+        - label: Everything I pasted is redacted — no real secrets, no private code
+          required: true
